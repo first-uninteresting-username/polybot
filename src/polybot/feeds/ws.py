@@ -87,11 +87,14 @@ class WsFeed:
     async def _session(self) -> bool:
         await self.ready_to_connect()
         async with websockets.connect(self.url, open_timeout=15, ping_interval=20, ping_timeout=20,
-                                      max_size=8 * 1024 * 1024, close_timeout=5) as ws:
+                                      max_size=8 * 1024 * 1024,
+                                      close_timeout=1 if self.resnapshot_after_s else 5) as ws:
             self._ws = ws
             self.status.connected = True
             self.status.connects += 1
-            log.info("feed %s connected", self.name)
+            # first connect at INFO; deliberate re-snapshot reconnects would flood the log
+            (log.info if self.status.connects == 1 or not self.resnapshot_after_s else log.debug)(
+                "feed %s connected", self.name)
             for frame in (self.subscribe() if self.subscribe else []):
                 await ws.send(frame)
             await self.on_connected()

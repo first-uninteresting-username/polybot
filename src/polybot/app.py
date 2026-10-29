@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
 import time
 from typing import Any
 
@@ -95,8 +96,10 @@ class LiveApp:
             age = wall - f.status.last_msg_wall_ms if f.status.last_msg_wall_ms else None
             feeds[f.name] = dict(connected=f.status.connected, messages=f.status.messages, age_ms=age,
                                  connects=f.status.connects, last_error=f.status.last_error, **f.status.extra)
+            # Judge by data age, not the instantaneous socket state: RTDS reconnects on purpose in
+            # snapshot-polling mode, and a reconnect is not an outage.
             limit = 120_000 if f.name == "clob" else 30_000
-            if not f.status.connected or age is None or age > limit:
+            if age is None or age > limit:
                 problems.append(f"feed_{f.name}")
         if self.queue.qsize() > 50_000:
             problems.append("queue_backlog")
@@ -148,17 +151,27 @@ class LiveApp:
             tasks += [asyncio.create_task(x.run(), name=type(x).__name__)
                       for x in (self.discovery, self.resolver, self.probe)]
             tasks.append(asyncio.create_task(self.consume(), name="consume"))
+            stop = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, stop.set)
+            stopper = asyncio.create_task(stop.wait(), name="stop")
             try:
-                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                done, _ = await asyncio.wait([*tasks, stopper], return_when=asyncio.FIRST_COMPLETED)
+                if stopper in done:
+                    log.info("shutdown requested; flushing recorder and database")
                 for t in done:
-                    if t.exception():
+                    if t is not stopper and not t.cancelled() and t.exception():
                         log.error("task %s died: %r", t.get_name(), t.exception())
                         raise t.exception()  # type: ignore[misc]
             finally:
+                stopper.cancel()
                 for t in tasks:
                     t.cancel()
                 for t in tasks:
                     with contextlib.suppress(BaseException):
                         await t
                 self.recorder.close()
+                self.store.close()
                 await runner.cleanup()
+                log.info("stopped cleanly")
