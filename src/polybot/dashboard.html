@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>polybot - paper trading</title>
+<style>
+  :root { --bg:#fcfcfb; --ink:#1d1d1b; --muted:#6b6b66; --line:#e4e4df; --series:#2a78d6; --card:#ffffff;
+          --good:#2e7d32; --bad:#c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1a1a19; --ink:#ececea; --muted:#a3a39c; --line:#33332f; --series:#3987e5; --card:#222220;
+            --good:#66bb6a; --bad:#ef5350; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  .warn { color:var(--bad); font-weight:600; }
+  .muted { color:var(--muted); }
+  main { padding:16px 24px; display:grid; gap:16px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .tile .k { color:var(--muted); font-size:12px; }
+  .tile .v { font-size:20px; font-variant-numeric:tabular-nums; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; }
+  section h2 { font-size:14px; margin:0 0 8px; }
+  table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
+  th, td { text-align:right; padding:3px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--muted); font-weight:500; }
+  #chart { position:relative; }
+  #chart svg { width:100%; height:220px; display:block; }
+  #tip { position:absolute; pointer-events:none; background:var(--card); border:1px solid var(--line); border-radius:6px;
+         padding:4px 8px; font-size:12px; display:none; white-space:nowrap; }
+  pre { margin:0; max-height:360px; overflow:auto; font-size:12px; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }
+  .ok { color:var(--good); } .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>polybot</h1>
+  <span class="muted">Paper trading only: no orders are ever placed. Polymarket BTC Up/Down 5m.</span>
+  <span id="health"></span>
+  <span id="label" class="warn"></span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <section>
+    <h2>Equity (USDC, settled trades, open positions at cost)</h2>
+    <div id="chart"><svg id="svg" role="img" aria-label="Equity curve"></svg><div id="tip"></div></div>
+  </section>
+  <div class="grid2">
+    <section><h2>Calibration: all periodic predictions (P(Up) vs outcome)</h2><div id="calAll"></div></section>
+    <section><h2>Calibration: traded (P(win) at decision vs outcome)</h2><div id="calTr"></div></section>
+  </div>
+  <div class="grid2">
+    <section><h2>Feeds and engine</h2><div id="feeds"></div></section>
+    <section><h2>Per day</h2><div id="perday"></div></section>
+  </div>
+  <section><h2>Recent signals</h2><div id="signals"></div></section>
+  <section><h2>Logs <a class="muted" href="/logs?n=1000">raw</a> <a class="muted" href="/logs?level=WARNING">warnings</a></h2><pre id="logs"></pre></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const pct = (x, d=3) => x == null ? "–" : (100*x).toFixed(d) + "%";
+const num = (x, d=2) => x == null ? "–" : Number(x).toFixed(d);
+const esc = s => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function table(rows, cols) {
+  if (!rows || !rows.length) return '<span class="muted">no data yet</span>';
+  return "<table><tr>" + cols.map(c => `<th>${c[0]}</th>`).join("") + "</tr>" +
+    rows.map(r => "<tr>" + cols.map(c => `<td>${esc(c[1](r))}</td>`).join("") + "</tr>").join("") + "</table>";
+}
+function tile(k, v) { return `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+
+function drawEquity(curve) {
+  const svg = $("svg"), tip = $("tip");
+  const W = svg.clientWidth || 800, H = 220, P = {l:56, r:12, t:10, b:24};
+  if (!curve || curve.length < 2) { svg.innerHTML = `<text x="12" y="24" fill="currentColor" opacity=".6">no settled trades yet</text>`; return; }
+  const xs = curve.map(p => p[0]), ys = curve.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const pad = (y1 - y0) * 0.1 || 1;
+  const X = t => P.l + (t - x0) / ((x1 - x0) || 1) * (W - P.l - P.r);
+  const Y = v => H - P.b - (v - (y0 - pad)) / ((y1 - y0 + 2*pad)) * (H - P.t - P.b);
+  let g = "";
+  for (let i = 0; i <= 4; i++) {
+    const v = y0 - pad + i * (y1 - y0 + 2*pad) / 4;
+    g += `<line x1="${P.l}" x2="${W-P.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/>` +
+         `<text x="${P.l-6}" y="${Y(v)+4}" text-anchor="end" font-size="11" fill="var(--muted)">${v.toFixed(2)}</text>`;
+  }
+  const d = curve.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = g + `<path d="${d}" fill="none" stroke="var(--series)" stroke-width="2"/>` +
+    `<line id="xh" y1="${P.t}" y2="${H-P.b}" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/>` +
+    `<circle id="dot" r="4" fill="var(--series)" stroke="var(--card)" stroke-width="2" visibility="hidden"/>` +
+    `<rect x="${P.l}" y="0" width="${W-P.l-P.r}" height="${H}" fill="transparent" id="hit"/>`;
+  $("hit").onmousemove = e => {
+    const r = svg.getBoundingClientRect(), mx = (e.clientX - r.left) * W / r.width;
+    let best = 0; for (let i = 1; i < curve.length; i++) if (Math.abs(X(curve[i][0]) - mx) < Math.abs(X(curve[best][0]) - mx)) best = i;
+    const p = curve[best];
+    $("xh").setAttribute("x1", X(p[0])); $("xh").setAttribute("x2", X(p[0])); $("xh").setAttribute("visibility", "visible");
+    $("dot").setAttribute("cx", X(p[0])); $("dot").setAttribute("cy", Y(p[1])); $("dot").setAttribute("visibility", "visible");
+    tip.style.display = "block"; tip.style.left = (X(p[0]) * r.width / W + 8) + "px"; tip.style.top = "8px";
+    tip.textContent = new Date(p[0]).toISOString().replace("T", " ").slice(0, 19) + "Z  equity " + p[1].toFixed(2);
+  };
+  $("hit").onmouseleave = () => { tip.style.display = "none"; $("xh").setAttribute("visibility","hidden"); $("dot").setAttribute("visibility","hidden"); };
+}
+
+async function refresh() {
+  try {
+    const [h, r, s, sig, logs] = await Promise.all([
+      fetch("/health").then(x => x.json()), fetch("/report").then(x => x.json()),
+      fetch("/api/state").then(x => x.json()), fetch("/api/signals?limit=50").then(x => x.json()),
+      fetch("/logs?n=200").then(x => x.text())]);
+    $("health").innerHTML = h.ok ? '<span class="ok">● healthy</span>' : `<span class="bad">● unhealthy: ${esc((h.problems||[]).join(", "))}</span>`;
+    $("label").textContent = r.label || "";
+    const b = r.bootstrap || {};
+    $("tiles").innerHTML = [
+      tile("Equity", num(r.bankroll.equity)), tile("Settled P&L after fees", num(r.pnl.settled_after_fees, 4)),
+      tile("%/day (compounded, wall clock)", pct(r.pnl.pct_per_day_compounded_wallclock)),
+      tile("Daily return 95% CI", b.ci95 ? pct(b.ci95[0]) + " … " + pct(b.ci95[1]) : "–"),
+      tile("Trades settled / open", r.trades.settled + " / " + r.trades.open),
+      tile("Win rate vs predicted", pct(r.trades.win_rate, 1) + " vs " + pct(r.trades.predicted_win_rate_decision, 1)),
+      tile("Brier (all preds)", num(r.calibration.all_predictions.brier, 4)),
+      tile("Signals / edge vanished", r.signals.total + " / " + pct(r.signals.edge_vanished_share, 1)),
+      tile("Max drawdown", pct(r.pnl.max_drawdown, 2)),
+      tile("Trades needed (80% power)", b.trades_needed_80pct_power ?? "–"),
+      tile("Fees paid", num(r.pnl.fees_paid, 4)), tile("Elapsed days", num(r.elapsed_days, 3)),
+    ].join("");
+    drawEquity(r.equity_curve);
+    const calCols = [["bin", x => x.bin], ["n", x => x.n], ["mean pred", x => num(x.mean_pred, 3)], ["actual", x => num(x.actual, 3)], ["± se", x => num(x.se, 3)]];
+    $("calAll").innerHTML = table(r.calibration.all_predictions.table, calCols);
+    $("calTr").innerHTML = table(r.calibration.traded.table, calCols);
+    const e = s.engine || {};
+    const feedRows = Object.entries(s.feeds || {}).map(([k, v]) => ({k, ...v}));
+    $("feeds").innerHTML = table(feedRows, [["feed", x => x.k], ["connected", x => x.connected ? "yes" : "NO"], ["msgs", x => x.messages], ["age ms", x => x.age_ms], ["reconnects", x => x.connects]]) +
+      `<p class="muted">σ/√s ${num(e.sigma_per_sqrt_s, 6)} · RTT median ${num(e.rtt_median_ms, 0)} ms (${e.rtt_samples} samples) · markets ${(e.markets||[]).map(m => m.slug.slice(-10) + (m.strike ? " K=" + m.strike.toFixed(2) : "")).join(", ")}</p>` +
+      `<p class="muted">counters ${esc(JSON.stringify(e.counters || {}))}</p>`;
+    $("perday").innerHTML = table(Object.entries(r.per_day || {}).map(([d, v]) => ({d, ...v})), [["day", x => x.d], ["trades", x => x.trades], ["P&L", x => num(x.pnl, 4)], ["fees", x => num(x.fees, 4)]]);
+    $("signals").innerHTML = table(sig, [["time", x => new Date(x.ts_ms).toISOString().slice(11, 19)], ["market", x => x.slug.slice(-10)], ["side", x => x.side], ["kind", x => x.kind], ["p_win", x => num(x.p_win, 3)], ["ask", x => num(x.best_ask, 2)], ["limit", x => num(x.limit_price, 2)], ["edge", x => num(x.edge, 3)], ["latency", x => num(x.latency_ms, 0)], ["status", x => x.status], ["net shares", x => num(x.net_shares, 2)], ["cost", x => num(x.cost, 2)], ["P&L", x => x.pnl == null ? "open" : num(x.pnl, 3)]]);
+    $("logs").textContent = logs.split("\n").reverse().join("\n");
+  } catch (err) { $("health").innerHTML = `<span class="bad">dashboard fetch failed: ${esc(err)}</span>`; }
+}
+refresh(); setInterval(refresh, 5000);
+</script>
+</body>
+</html>

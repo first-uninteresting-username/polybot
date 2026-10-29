@@ -1,0 +1,66 @@
+[
+ {
+  "recv_ms": 1793304476491,
+  "raw": ""
+ },
+ {
+  "recv_ms": 1793304476493,
+  "raw": "{\"payload\":{\"data\":[{\"timestamp\":1793304417000,\"value\":80039.92463532},{\"timestamp\":1793304418000,\"value\":80021.90443814582},{\"timestamp\":1793304419000,\"value\":80036.05943226648},{\"timestamp\":1793304420000,\"value\":80047.05033087413},{\"timestamp\":1793304421000,\"value\":80047.00900364754},{\"timestamp\":1793304422000,\"value\":80042.22600642178},{\"timestamp\":1793304423000,\"value\":80049.8788670328},{\"timestamp\":1793304424000,\"value\":80055.5426411939},{\"timestamp\":1793304425000,\"value\":80065.00330719468},{\"timestamp\":1793304426000,\"value\":80079.51822918473},{\"timestamp\":1793304427000,\"value\":80078.41682040477},{\"timestamp\":1793304428000,\"value\":80080.76238830863},{\"timestamp\":1793304429000,\"value\":80084.17441522381},{\"timestamp\":1793304430000,\"value\":80074.03703692275},{\"timestamp\":1793304431000,\"value\":80073.11191678446},{\"timestamp\":1793304432000,\"value\":80089.53047409724},{\"timestamp\":1793304433000,\"value\":80095.91729266204},{\"timestamp\":1793304434000,\"value\":80090.99563941809},{\"timestamp\":1793304435000,\"value\":80096.16561438012},{\"timestamp\":1793304436000,\"value\":80095.99745961408},{\"timestamp\":1793304437000,\"value\":80095.06479585396},{\"timestamp\":1793304438000,\"value\":80117.86329631397},{\"timestamp\":1793304439000,\"value\":80118.27806483564},{\"timestamp\":1793304440000,\"value\":80117.86871876518},{\"timestamp\":1793304441000,\"value\":80114.12754417413},{\"timestamp\":1793304442000,\"value\":80114.74300230523},{\"timestamp\":1793304443000,\"value\":80124.45230834777},{\"timestamp\":1793304444000,\"value\":80126.70535853285},{\"timestamp\":1793304445000,\"value\":80110.99570242211},{\"timestamp\":1793304446000,\"value\":80114.1929111871},{\"timestamp\":1793304447000,\"value\":80126.13516464988},{\"timestamp\":1793304448000,\"value\":80131.37110710533},{\"timestamp\":1793304449000,\"value\":80146.55151790612},{\"timestamp\":1793304450000,\"value\":80156.73735113922},{\"timestamp\":1793304451000,\"value\":80161.22188094966},{\"timestamp\":1793304452000,\"value\":80162.44668936632},{\"timestamp\":1793304453000,\"value\":80164.27087615321},{\"timestamp\":1793304454000,\"value\":80172.26536418486},{\"timestamp\":1793304455000,\"value\":80152.51433201233},{\"timestamp\":1793304456000,\"value\":80134.51574872335},{\"timestamp\":1793304457000,\"value\":80123.59188206666},{\"timestamp\":1793304458000,\"value\":80118.47744868282},{\"timestamp\":1793304459000,\"value\":80114.20977393302},{\"timestamp\":1793304460000,\"value\":80109.06687517877},{\"timestamp\":1793304461000,\"value\":80107.5431980797},{\"timestamp\":1793304462000,\"value\":80110.95928912386},{\"timestamp\":1793304463000,\"value\":80111.89209296906},{\"timestamp\":1793304464000,\"value\":80123.24732881268},{\"timestamp\":1793304465000,\"value\":80137.86161484712},{\"timestamp\":1793304466000,\"value\":80140.95357351066},{\"timestamp\":1793304467000,\"value\":80167.03091450718},{\"timestamp\":1793304468000,\"value\":80170.73410131664},{\"timestamp\":1793304469000,\"value\":80174.07337149634},{\"timestamp\":1793304470000,\"value\":80182.04316899557},{\"timestamp\":1793304471000,\"value\":80191.31454609388},{\"timestamp\":1793304472000,\"value\":80193.95119518481},{\"timestamp\":1793304473000,\"value\":80192.14658762705},{\"timestamp\":1793304474000,\"value\":80190.93833386},{\"timestamp\":1793304475000,\"value\":80174.42305121804}],\"symbol\":\"btc/usd\"},\"timestamp\":1793304476468,\"topic\":\"crypto_prices\",\"type\":\"subscribe\"}"
+ },
+ {
+  "recv_ms": 1793304478244,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80172610358001385000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304477000,\"value\":80172.61035800139},\"timestamp\":1793304477952,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304479799,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80171965626836450000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304478000,\"value\":80171.96562683645},\"timestamp\":1793304479443,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304480463,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80176755605200595000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304479000,\"value\":80176.7556052006},\"timestamp\":1793304480172,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304481268,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80179324911936185000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304480000,\"value\":80179.32491193619},\"timestamp\":1793304480901,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304482574,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80195305095330000000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304481000,\"value\":80195.30509533},\"timestamp\":1793304482294,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304483302,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80200890418058810000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304482000,\"value\":80200.89041805881},\"timestamp\":1793304482987,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304484753,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80209118970657425000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304483000,\"value\":80209.11897065742},\"timestamp\":1793304484460,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304485406,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80210813388865020000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304484000,\"value\":80210.81338886502},\"timestamp\":1793304485143,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304486264,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80211289448170135000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304485000,\"value\":80211.28944817014},\"timestamp\":1793304485883,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304487557,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80212339585030000000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304486000,\"value\":80212.33958503},\"timestamp\":1793304487223,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304488209,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80221754502248570000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304487000,\"value\":80221.75450224857},\"timestamp\":1793304487916,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304489593,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80232673127897695000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304488000,\"value\":80232.6731278977},\"timestamp\":1793304489334,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304490338,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80233790839772665000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304489000,\"value\":80233.79083977267},\"timestamp\":1793304490052,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304491654,
+  "raw": "{\"connection_id\":\"gfFqQ24tkWeIKEj_lA==\",\"payload\":{\"full_accuracy_value\":\"80213248198472120000000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304490000,\"value\":80213.24819847212},\"timestamp\":1793304491383,\"topic\":\"crypto_prices_chainlink\",\"type\":\"update\"}"
+ }
+]

@@ -1,0 +1,6 @@
+[
+ {
+  "recv_ms": 1793304445913,
+  "raw": "{\"op\":\"error\",\"channel\":\"price.crypto.twap\",\"code\":\"auth_required\"}"
+ }
+]

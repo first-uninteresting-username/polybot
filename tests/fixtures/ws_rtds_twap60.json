@@ -1,0 +1,62 @@
+[
+ {
+  "recv_ms": 1793304445851,
+  "raw": ""
+ },
+ {
+  "recv_ms": 1793304445851,
+  "raw": "{\"payload\":{\"data\":[{\"full_accuracy_value\":\"80206552520746690674688\",\"timestamp\":1793304386000,\"value\":80206.55252074669},{\"full_accuracy_value\":\"80203827295249431003136\",\"timestamp\":1793304387000,\"value\":80203.82729524943},{\"full_accuracy_value\":\"80201133032078965735424\",\"timestamp\":1793304388000,\"value\":80201.13303207897},{\"full_accuracy_value\":\"80198786513032504672256\",\"timestamp\":1793304389000,\"value\":80198.78651303251},{\"full_accuracy_value\":\"80194081926693743755264\",\"timestamp\":1793304390000,\"value\":80194.08192669375},{\"full_accuracy_value\":\"80194081926693743755264\",\"timestamp\":1793304391000,\"value\":80194.08192669375},{\"full_accuracy_value\":\"80191588816128686686208\",\"timestamp\":1793304392000,\"value\":80191.58881612869},{\"full_accuracy_value\":\"80187218655046096912384\",\"timestamp\":1793304393000,\"value\":80187.21865504609},{\"full_accuracy_value\":\"80184982564645269143552\",\"timestamp\":1793304394000,\"value\":80184.98256464527},{\"full_accuracy_value\":\"80184982564645269143552\",\"timestamp\":1793304395000,\"value\":80184.98256464527},{\"full_accuracy_value\":\"80180990296536337350656\",\"timestamp\":1793304397000,\"value\":80180.99029653634},{\"full_accuracy_value\":\"80176927326912735346688\",\"timestamp\":1793304398000,\"value\":80176.92732691273},{\"full_accuracy_value\":\"80176927326912735346688\",\"timestamp\":1793304399000,\"value\":80176.92732691273},{\"full_accuracy_value\":\"80174630013896006565888\",\"timestamp\":1793304400000,\"value\":80174.630013896},{\"full_accuracy_value\":\"80172893200491831361536\",\"timestamp\":1793304401000,\"value\":80172.89320049183},{\"full_accuracy_value\":\"80171158743212292571136\",\"timestamp\":1793304402000,\"value\":80171.15874321229},{\"full_accuracy_value\":\"80169261194572497682432\",\"timestamp\":1793304403000,\"value\":80169.2611945725},{\"full_accuracy_value\":\"80167192593317568184320\",\"timestamp\":1793304404000,\"value\":80167.19259331757},{\"full_accuracy_value\":\"80165202274634820485120\",\"timestamp\":1793304405000,\"value\":80165.20227463482},{\"full_accuracy_value\":\"80163193312253294149632\",\"timestamp\":1793304406000,\"value\":80163.1933122533},{\"full_accuracy_value\":\"80158759684852093550592\",\"timestamp\":1793304407000,\"value\":80158.75968485209},{\"full_accuracy_value\":\"80158759684852093550592\",\"timestamp\":1793304408000,\"value\":80158.75968485209},{\"full_accuracy_value\":\"80156343793508010688512\",\"timestamp\":1793304409000,\"value\":80156.34379350801},{\"full_accuracy_value\":\"80153826780382148689920\",\"timestamp\":1793304410000,\"value\":80153.82678038215},{\"full_accuracy_value\":\"80149290366506654236672\",\"timestamp\":1793304411000,\"value\":80149.29036650666},{\"full_accuracy_value\":\"80147123017609201582080\",\"timestamp\":1793304412000,\"value\":80147.1230176092},{\"full_accuracy_value\":\"80147123017609201582080\",\"timestamp\":1793304413000,\"value\":80147.1230176092},{\"full_accuracy_value\":\"80144889246368239976448\",\"timestamp\":1793304414000,\"value\":80144.88924636824},{\"full_accuracy_value\":\"80140647671381144633344\",\"timestamp\":1793304415000,\"value\":80140.64767138114},{\"full_accuracy_value\":\"80140647671381144633344\",\"timestamp\":1793304416000,\"value\":80140.64767138114},{\"full_accuracy_value\":\"80137967034333241802752\",\"timestamp\":1793304417000,\"value\":80137.96703433324},{\"full_accuracy_value\":\"80132097781179443314688\",\"timestamp\":1793304418000,\"value\":80132.09778117944},{\"full_accuracy_value\":\"80132097781179443314688\",\"timestamp\":1793304419000,\"value\":80132.09778117944},{\"full_accuracy_value\":\"80129541672769215791104\",\"timestamp\":1793304420000,\"value\":80129.54167276922},{\"full_accuracy_value\":\"80126767781375532597248\",\"timestamp\":1793304421000,\"value\":80126.76778137553},{\"full_accuracy_value\":\"80124224984413397581824\",\"timestamp\":1793304422000,\"value\":80124.22498441339},{\"full_accuracy_value\":\"80121855747379402113024\",\"timestamp\":1793304423000,\"value\":80121.8557473794},{\"full_accuracy_value\":\"80117141893316454907904\",\"timestamp\":1793304424000,\"value\":80117.14189331645},{\"full_accuracy_value\":\"80117141893316454907904\",\"timestamp\":1793304425000,\"value\":80117.14189331645},{\"full_accuracy_value\":\"80114934730995821182976\",\"timestamp\":1793304426000,\"value\":80114.93473099582},{\"full_accuracy_value\":\"80110976897048652021760\",\"timestamp\":1793304427000,\"value\":80110.97689704865},{\"full_accuracy_value\":\"80110976897048652021760\",\"timestamp\":1793304428000,\"value\":80110.97689704865},{\"full_accuracy_value\":\"80109796145755641085952\",\"timestamp\":1793304429000,\"value\":80109.79614575564},{\"full_accuracy_value\":\"80108478122553572851712\",\"timestamp\":1793304430000,\"value\":80108.47812255357},{\"full_accuracy_value\":\"80105897583583051120640\",\"timestamp\":1793304431000,\"value\":80105.89758358305},{\"full_accuracy_value\":\"80105897583583051120640\",\"timestamp\":1793304432000,\"value\":80105.89758358305},{\"full_accuracy_value\":\"80104057269155553869824\",\"timestamp\":1793304433000,\"value\":80104.05726915556},{\"full_accuracy_value\":\"80102170955043529818112\",\"timestamp\":1793304434000,\"value\":80102.17095504353},{\"full_accuracy_value\":\"80100520915576209539072\",\"timestamp\":1793304435000,\"value\":80100.52091557621},{\"full_accuracy_value\":\"80096811100393411969024\",\"timestamp\":1793304436000,\"value\":80096.81110039342},{\"full_accuracy_value\":\"80096811100393411969024\",\"timestamp\":1793304437000,\"value\":80096.81110039342},{\"full_accuracy_value\":\"80095183274761137422336\",\"timestamp\":1793304438000,\"value\":80095.18327476113},{\"full_accuracy_value\":\"80092666444735804604416\",\"timestamp\":1793304439000,\"value\":80092.6664447358},{\"full_accuracy_value\":\"80092666444735804604416\",\"timestamp\":1793304440000,\"value\":80092.6664447358},{\"full_accuracy_value\":\"80092136753028992598016\",\"timestamp\":1793304441000,\"value\":80092.13675302899},{\"full_accuracy_value\":\"80092136753028992598016\",\"timestamp\":1793304442000,\"value\":80092.13675302899},{\"full_accuracy_value\":\"80091649667665487724544\",\"timestamp\":1793304443000,\"value\":80091.6496676655},{\"full_accuracy_value\":\"80091649667665487724544\",\"timestamp\":1793304444000,\"value\":80091.6496676655}],\"symbol\":\"btc/usd\",\"window_s\":60},\"timestamp\":1793304445816,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"subscribe\"}"
+ },
+ {
+  "recv_ms": 1793304446696,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80091343368044161269760\",\"symbol\":\"btc/usd\",\"timestamp\":1793304445000,\"value\":80091.34336804417,\"window_s\":60},\"timestamp\":1793304446306,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304447335,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80091245314262479929344\",\"symbol\":\"btc/usd\",\"timestamp\":1793304446000,\"value\":80091.24531426247,\"window_s\":60},\"timestamp\":1793304446924,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304448703,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80090162905687357652992\",\"symbol\":\"btc/usd\",\"timestamp\":1793304447000,\"value\":80090.16290568736,\"window_s\":60},\"timestamp\":1793304448316,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304449361,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80090162905687357652992\",\"symbol\":\"btc/usd\",\"timestamp\":1793304448000,\"value\":80090.16290568736,\"window_s\":60},\"timestamp\":1793304448998,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304450617,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80089440989715655294976\",\"symbol\":\"btc/usd\",\"timestamp\":1793304449000,\"value\":80089.44098971566,\"window_s\":60},\"timestamp\":1793304450199,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304451325,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80088966046689995522048\",\"symbol\":\"btc/usd\",\"timestamp\":1793304450000,\"value\":80088.96604669,\"window_s\":60},\"timestamp\":1793304450919,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304452600,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80088716772542251008000\",\"symbol\":\"btc/usd\",\"timestamp\":1793304451000,\"value\":80088.71677254225,\"window_s\":60},\"timestamp\":1793304452176,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304453870,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80089438277785324879872\",\"symbol\":\"btc/usd\",\"timestamp\":1793304452000,\"value\":80089.43827778533,\"window_s\":60},\"timestamp\":1793304453414,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304454547,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80089438277785324879872\",\"symbol\":\"btc/usd\",\"timestamp\":1793304453000,\"value\":80089.43827778533,\"window_s\":60},\"timestamp\":1793304454054,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304455829,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80090622698957567950848\",\"symbol\":\"btc/usd\",\"timestamp\":1793304454000,\"value\":80090.62269895757,\"window_s\":60},\"timestamp\":1793304455414,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304456530,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80090622698957567950848\",\"symbol\":\"btc/usd\",\"timestamp\":1793304455000,\"value\":80090.62269895757,\"window_s\":60},\"timestamp\":1793304456101,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304457812,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80091690108206675132416\",\"symbol\":\"btc/usd\",\"timestamp\":1793304456000,\"value\":80091.69010820668,\"window_s\":60},\"timestamp\":1793304457325,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ },
+ {
+  "recv_ms": 1793304458364,
+  "raw": "{\"connection_id\":\"gfFqHS77HWeIKEi-0A==\",\"payload\":{\"full_accuracy_value\":\"80091690108206675132416\",\"symbol\":\"btc/usd\",\"timestamp\":1793304457000,\"value\":80091.69010820668,\"window_s\":60},\"timestamp\":1793304457937,\"topic\":\"crypto_prices_twap_sixty\",\"type\":\"update\"}"
+ }
+]
