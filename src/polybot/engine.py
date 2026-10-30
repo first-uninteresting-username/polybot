@@ -13,6 +13,7 @@ Order of operations for every incoming event at time ``t``:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -125,6 +126,14 @@ class Engine:
             "SELECT DISTINCT f.slug FROM fills f LEFT JOIN settlements s ON s.id=f.id WHERE s.id IS NULL"
         ):
             self.open_slugs.add(r[0])
+
+    def reset_trading(self) -> None:
+        """Forget in-memory orders and positions after ``Storage.reset_trading`` (market state stays)."""
+        self.pending.clear()
+        self.resting.clear()
+        self.open_slugs.clear()
+        self.counters.clear()
+        self.last_decision = {}
 
     def _inc(self, k: str, n: int = 1) -> None:
         self.counters[k] = self.counters.get(k, 0) + n
@@ -324,6 +333,21 @@ class Engine:
         inp = self.model_input(ms)
         return self.model.predict(inp) if inp else None
 
+    def predict_band(self, ms: MarketState) -> tuple[Prediction, float, float] | None:
+        """Central prediction plus the lowest and highest P(Up) with sigma and basis sd scaled by
+        1/model_sd_band .. model_sd_band. P(Up) is monotone in the spread, so the endpoints bound it."""
+        inp = self.model_input(ms)
+        if inp is None:
+            return None
+        pred = self.model.predict(inp)
+        ps = [pred.p_up]
+        k = self.s.model_sd_band
+        if k > 1.0:
+            for f in (1.0 / k, k):
+                ps.append(self.model.predict(dataclasses.replace(inp, sigma=inp.sigma * f,
+                                                                 basis_sd=inp.basis_sd * f)).p_up)
+        return pred, min(ps), max(ps)
+
     # ------------------------------------------------------------------ strategy
     def fresh(self, m: MarketInfo) -> str | None:
         """Reason string if any required feed is stale (event time), else None."""
@@ -342,6 +366,8 @@ class Engine:
             b = self.books.get(t)
             if b is None or not b.has_snapshot:
                 return "no_book"
+            if b.desynced:
+                return "book_desync"
         return None
 
     def available_cash(self) -> float:
@@ -350,6 +376,15 @@ class Engine:
 
     def equity(self) -> float:
         return self.store.cash(self.s.starting_bankroll) + self.store.open_cost()
+
+    def stake_budget(self, p_win: float, cost: float) -> float:
+        """USDC to commit when buying at all-in ``cost`` per share with win probability ``p_win``: the
+        smaller of ``stake_fraction`` and ``kelly_fraction`` x the Kelly fraction (p - c) / (1 - c)."""
+        frac = self.s.stake_fraction
+        if self.s.kelly_fraction > 0:
+            kelly = (p_win - cost) / (1.0 - cost) if cost < 1.0 else 0.0
+            frac = min(frac, self.s.kelly_fraction * max(kelly, 0.0))
+        return min(frac * self.equity(), self.s.max_stake_usd, self.available_cash())
 
     def _evaluate(self) -> None:
         now_s = self.now_ms / 1000.0
@@ -366,17 +401,17 @@ class Engine:
             m = ms.info
             if not (m.start_ts <= now_s < m.end_ts):
                 continue
-            pred = self.predict(ms)
+            band = self.predict_band(ms)
             bucket = self.now_ms - self.now_ms % PREDICTION_EVERY_MS
-            if pred is not None and bucket > ms.last_pred_ms:
+            if band is not None and bucket > ms.last_pred_ms:
                 ms.last_pred_ms = bucket
-                self.store.insert_prediction(m.slug, bucket, m.end_ts - now_s, pred.p_up)
-            self._consider_entry(ms, pred)
+                self.store.insert_prediction(m.slug, bucket, m.end_ts - now_s, band[0].p_up)
+            self._consider_entry(ms, band)
 
-    def _consider_entry(self, ms: MarketState, pred: Prediction | None) -> None:
+    def _consider_entry(self, ms: MarketState, band: tuple[Prediction, float, float] | None) -> None:
         m = ms.info
         tau = m.end_ts - self.now_ms / 1000.0
-        if pred is None or not (self.s.min_tau_s <= tau <= self.s.max_tau_s) or not m.accepting_orders:
+        if band is None or not (self.s.min_tau_s <= tau <= self.s.max_tau_s) or not m.accepting_orders:
             return
         if self.store.entries_for(m.slug) >= self.s.max_entries_per_market:
             return
@@ -389,29 +424,34 @@ class Engine:
         if stale:
             self._inc("skip_" + stale)
             return
-        clip = self.s.p_clip
-        best: tuple[float, str, str, float, float, float] | None = None
-        for side, token, p in (("Up", m.token_up, pred.p_up), ("Down", m.token_down, 1.0 - pred.p_up)):
-            p_win = min(max(p, 1.0 - clip), clip)
+        pred, lo, hi = band
+        best: tuple[float, str, str, float, float, float, float] | None = None
+        # p_win: central estimate (recorded, used for calibration); p_safe: worst case over the sd band
+        # (used for every trading decision).
+        for side, token, p, p_worst in (("Up", m.token_up, pred.p_up, lo),
+                                        ("Down", m.token_down, 1.0 - pred.p_up, 1.0 - hi)):
+            p_win, p_safe = self._clip(p), self._clip(p_worst)
             book = self.books[token]
             ask = book.best_ask()
             if ask is None:
                 continue
-            edge = p_win - all_in_cost_per_share(ask, m.fee_rate, m.fee_exponent)
+            edge = p_safe - all_in_cost_per_share(ask, m.fee_rate, m.fee_exponent)
             if edge < self.s.min_edge:
+                continue
+            if self._market_disagrees(p_win, book.best_bid(), ask):
                 continue
             tick = book.tick or m.tick_size
             limit = floor_to_tick(ask + self.s.limit_slippage_ticks * tick, tick)
-            while limit > ask + 1e-9 and p_win - all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent) < self.s.min_edge:
+            while limit > ask + 1e-9 and p_safe - all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent) < self.s.min_edge:
                 limit = round(limit - tick, 6)
             limit = min(limit, 0.99)
             if best is None or edge > best[0]:
-                best = (edge, side, token, p_win, ask, limit)
+                best = (edge, side, token, p_win, p_safe, ask, limit)
         if best is None:
-            self._maybe_maker(ms, pred)
+            self._maybe_maker(ms, band)
             return
-        edge, side, token, p_win, ask, limit = best
-        budget = min(self.s.stake_fraction * self.equity(), self.s.max_stake_usd, self.available_cash())
+        edge, side, token, p_win, p_safe, ask, limit = best
+        budget = self.stake_budget(p_safe, all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent))
         pre = simulate_taker_buy(self.books[token].asks_ascending(), limit, budget, m.min_size, m.fee_rate,
                                  m.fee_exponent, self.s.book_take_fraction, self.s.fee_round_up)
         if not pre.levels:
@@ -419,23 +459,42 @@ class Engine:
             return
         self._submit(ms, side, token, "taker", p_win, ask, limit, edge, tau, budget)
 
-    def _maybe_maker(self, ms: MarketState, pred: Prediction) -> None:
+    def _clip(self, p: float) -> float:
+        return min(max(p, 1.0 - self.s.p_clip), self.s.p_clip)
+
+    def _market_disagrees(self, p_win: float, bid: float | None, ask: float) -> bool:
+        """A liquid market far from the model is far more often a model or data error (wrong strike,
+        stale oracle, vol regime change) than free money."""
+        gap = self.s.max_model_market_gap
+        if gap <= 0:
+            return False
+        mid = (bid + ask) / 2 if bid is not None else ask
+        if abs(p_win - mid) > gap:
+            self._inc("skip_model_market_gap")
+            return True
+        return False
+
+    def _maybe_maker(self, ms: MarketState, band: tuple[Prediction, float, float]) -> None:
         if not self.s.enable_maker:
             return
         m = ms.info
         tau = m.end_ts - self.now_ms / 1000.0
-        for side, token, p in (("Up", m.token_up, pred.p_up), ("Down", m.token_down, 1.0 - pred.p_up)):
-            p_win = min(max(p, 1.0 - self.s.p_clip), self.s.p_clip)
+        pred, lo, hi = band
+        for side, token, p, p_worst in (("Up", m.token_up, pred.p_up, lo),
+                                        ("Down", m.token_down, 1.0 - pred.p_up, 1.0 - hi)):
+            p_win, p_safe = self._clip(p), self._clip(p_worst)
             book = self.books[token]
             ask = book.best_ask()
             tick = book.tick or m.tick_size
-            price = floor_to_tick(p_win - self.s.min_edge, tick)  # maker pays no fee
+            price = floor_to_tick(p_safe - self.s.min_edge, tick)  # maker pays no fee
             if ask is None or price <= 0 or price >= ask - 1e-9:
                 continue
-            budget = min(self.s.stake_fraction * self.equity(), self.s.max_stake_usd, self.available_cash())
+            if self._market_disagrees(p_win, book.best_bid(), ask):
+                continue
+            budget = self.stake_budget(p_safe, price)
             if floor_size(budget / price) < m.min_size:
                 continue
-            self._submit(ms, side, token, "maker", p_win, ask, price, p_win - price, tau, budget)
+            self._submit(ms, side, token, "maker", p_win, ask, price, p_safe - price, tau, budget)
             return
 
     def sample_latency_ms(self, sid: str) -> float:

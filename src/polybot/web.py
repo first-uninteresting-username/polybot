@@ -1,7 +1,9 @@
-"""Read-only HTTP endpoints: /health, /report, /api/state, /api/signals, /logs and a small dashboard at /."""
+"""HTTP endpoints: /health, /report, /api/state, /api/signals, /logs, a small dashboard at /, and
+POST /api/reset (the only one that changes anything: it wipes the paper account)."""
 
 from __future__ import annotations
 
+import hmac
 import json
 import time
 from collections.abc import Callable
@@ -14,7 +16,8 @@ from .logging_setup import RING
 
 
 def make_app(health: Callable[[], dict[str, Any]], report: Callable[[], dict[str, Any]],
-             state: Callable[[], dict[str, Any]], signals: Callable[[int], list[dict[str, Any]]]) -> web.Application:
+             state: Callable[[], dict[str, Any]], signals: Callable[[int], list[dict[str, Any]]],
+             reset: Callable[[], dict[str, Any]] | None = None, admin_token: str = "") -> web.Application:
     app = web.Application()
     page = resources.files("polybot").joinpath("dashboard.html").read_text()
 
@@ -41,6 +44,22 @@ def make_app(health: Callable[[], dict[str, Any]], report: Callable[[], dict[str
         lines = [ln for ln in list(RING.lines)[-5000:] if not level or f'"level": "{level}"' in ln][-n:]
         return web.Response(text="\n".join(lines) + "\n", content_type="text/plain")
 
+    async def h_reset(req: web.Request) -> web.Response:
+        if reset is None:
+            return js({"ok": False, "error": "reset not available"}, 404)
+        # A JSON body cannot be sent cross-site without a CORS preflight, so this also stops CSRF.
+        if req.content_type != "application/json":
+            return js({"ok": False, "error": "expected application/json"}, 415)
+        if admin_token and not hmac.compare_digest(req.headers.get("X-Admin-Token", ""), admin_token):
+            return js({"ok": False, "error": "admin token required", "token_required": True}, 401)
+        try:
+            body = await req.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or body.get("confirm") != "RESET":
+            return js({"ok": False, "error": 'body must be {"confirm": "RESET"}'}, 400)
+        return js(reset())
+
     async def h_index(_: web.Request) -> web.Response:
         return web.Response(text=page, content_type="text/html")
 
@@ -50,5 +69,6 @@ def make_app(health: Callable[[], dict[str, Any]], report: Callable[[], dict[str
     app.router.add_get("/api/state", h_state)
     app.router.add_get("/api/signals", h_signals)
     app.router.add_get("/logs", h_logs)
+    app.router.add_post("/api/reset", h_reset)
     app["started"] = time.time()
     return app

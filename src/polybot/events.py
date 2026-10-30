@@ -56,6 +56,8 @@ class BookDelta:
     side: str  # "BUY" (bid side) or "SELL" (ask side)
     price: float
     size: float  # new aggregate size at this level; 0 removes it
+    best_bid: float | None = None  # exchange's best bid/ask after this change ("0"/"1" = side empty)
+    best_ask: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +158,10 @@ def parse_coinbase(recv_ms: int, raw: str) -> list[Event]:
     return [PriceTick("coinbase", recv_ms, _iso_ms(d["time"]), float(d["price"]))]
 
 
+def _opt_float(v: Any) -> float | None:
+    return float(v) if v not in (None, "") else None
+
+
 def _clob_one(recv_ms: int, d: dict[str, Any]) -> list[Event]:
     et = d.get("event_type")
     ts = int(d.get("timestamp") or recv_ms)
@@ -163,7 +169,8 @@ def _clob_one(recv_ms: int, d: dict[str, Any]) -> list[Event]:
         return [BookSnapshot(d["asset_id"], recv_ms, ts, _levels(d.get("bids", [])), _levels(d.get("asks", [])))]
     if et == "price_change":
         return [
-            BookDelta(c["asset_id"], recv_ms, ts, c["side"], float(c["price"]), float(c["size"]))
+            BookDelta(c["asset_id"], recv_ms, ts, c["side"], float(c["price"]), float(c["size"]),
+                      _opt_float(c.get("best_bid")), _opt_float(c.get("best_ask")))
             for c in d.get("price_changes", [])
         ]
     if et == "last_trade_price":
