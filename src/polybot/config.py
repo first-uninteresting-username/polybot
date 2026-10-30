@@ -40,7 +40,7 @@ class Settings:
     stale_exchange_ms: int = 2000
     stale_book_ms: int = 5000  # Polymarket books only change when someone acts
     stale_oracle_ms: int = 12000  # by Chainlink timestamp; RTDS may be in 5 s snapshot-polling mode
-    rtds_resnapshot_s: float = 5.0
+    rtds_resnapshot_s: float = 3.0
 
     # --- model ---
     model: str = "gbm_twap"
@@ -54,7 +54,8 @@ class Settings:
     twap_err_sd: float = 5e-5  # log-sd: published TWAP vs mean of 1 s spot prints (measured ~3-4e-5)
 
     # --- strategy ---
-    eval_interval_ms: int = 500
+    eval_interval_ms: int = 100
+    prediction_interval_ms: int = 1000  # unselected P(Up) samples stored for calibration and research
     min_edge: float = 0.03  # required (p_win - all-in cost per share)
     min_tau_s: float = 15.0
     max_tau_s: float = 285.0

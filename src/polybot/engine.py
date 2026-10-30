@@ -46,7 +46,6 @@ from .storage import Storage
 log = logging.getLogger("polybot.engine")
 
 VENUES = ("binance", "coinbase")
-PREDICTION_EVERY_MS = 10_000
 HISTORY_S = 3600
 
 
@@ -402,7 +401,7 @@ class Engine:
             if not (m.start_ts <= now_s < m.end_ts):
                 continue
             band = self.predict_band(ms)
-            bucket = self.now_ms - self.now_ms % PREDICTION_EVERY_MS
+            bucket = self.now_ms - self.now_ms % self.s.prediction_interval_ms
             if band is not None and bucket > ms.last_pred_ms:
                 ms.last_pred_ms = bucket
                 self.store.insert_prediction(m.slug, bucket, m.end_ts - now_s, band[0].p_up)

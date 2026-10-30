@@ -14,6 +14,7 @@ from .storage import Storage
 
 Z95 = 1.959964
 Z80_POWER = 0.841621
+CALIBRATION_SAMPLE_MS = 10_000  # one prediction per 10 s: neighbours add load, not information
 
 
 def _day(ms: int) -> str:
@@ -90,7 +91,7 @@ def build_report(store: Storage, starting_bankroll: float, now_ms: int, target_d
     # calibration on ALL periodic predictions (not just traded ones, which are selected)
     pred_rows = store.query(
         "SELECT p.p_up, m.winner FROM predictions p JOIN markets m ON m.slug=p.slug "
-        "WHERE m.winner IN ('Up','Down')"
+        f"WHERE m.winner IN ('Up','Down') AND p.ts_ms % {CALIBRATION_SAMPLE_MS} = 0"
     )
     all_pairs = [(float(r["p_up"]), 1 if r["winner"] == "Up" else 0) for r in pred_rows]
 

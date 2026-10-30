@@ -3,14 +3,14 @@
 Every message the engine sees is appended as one JSON line ``[recv_ms, source, raw]`` to
 ``<data>/recordings/YYYY-MM-DD.jsonl.zst`` (UTC date of recv_ms). Files are zstd-compressed and flushed
 as complete frames, so a crash loses at most the last ``flush_interval_s`` of data and never corrupts
-earlier frames. A restart appends a new frame to the same day's file.
+earlier frames. A restart appends a new frame to the same day's file; the reader skips a damaged frame.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import logging
+import mmap
 import os
 import time
 from collections.abc import Iterator
@@ -21,6 +21,8 @@ from typing import BinaryIO
 import zstandard as zstd
 
 log = logging.getLogger("polybot.recorder")
+
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 
 def day_of(recv_ms: int) -> str:
@@ -63,7 +65,7 @@ class Recorder:
         self.close()
         self._day = day
         self._fh = open(self.dir / f"{day}.jsonl.zst", "ab")  # noqa: SIM115 - long-lived handle
-        self._writer = zstd.ZstdCompressor(level=6).stream_writer(self._fh, closefd=False)
+        self._writer = zstd.ZstdCompressor(level=6, write_checksum=True).stream_writer(self._fh, closefd=False)
         self._apply_retention()
 
     def _apply_retention(self) -> None:
@@ -85,21 +87,62 @@ class Recorder:
         self._fh = None
 
 
-def read_recording(path: str | Path) -> Iterator[tuple[int, str, str]]:
-    """Yield ``(recv_ms, source, raw)``; tolerates a truncated last frame or line."""
+def _parses(content: bytes) -> bool:
+    try:
+        for line in content.splitlines():
+            json.loads(line)
+    except ValueError:
+        return False
+    return True
+
+
+def _frames(path: str | Path) -> Iterator[bytes]:
+    """Yield the decompressed content of each zstd frame, skipping corrupt ones.
+
+    A process killed mid-write leaves a damaged frame, and the next start appends after it, so a plain
+    stream reader would stop there and silently lose everything behind it. The magic number can also
+    occur inside compressed data, so a frame that has not ended yet continues past such a false match.
+    """
     with open(path, "rb") as fh:
-        reader = zstd.ZstdDecompressor().stream_reader(fh, read_across_frames=True)
-        text = io.TextIOWrapper(io.BufferedReader(reader), encoding="utf-8")
-        try:
-            for line in text:
-                try:
-                    recv_ms, source, raw = json.loads(line)
-                except (ValueError, TypeError):
-                    log.warning("skipping truncated/corrupt line in %s", path)
-                    continue
-                yield int(recv_ms), source, raw
-        except zstd.ZstdError as exc:
-            log.warning("recording %s ends with an incomplete frame: %s", path, exc)
+        size = os.fstat(fh.fileno()).st_size
+        if size == 0:
+            return
+        data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+        start = data.find(ZSTD_MAGIC)
+        while start >= 0:
+            decoder = zstd.ZstdDecompressor().decompressobj()
+            parts: list[bytes] = []
+            pos, next_start = start, -1
+            try:
+                while True:
+                    next_start = data.find(ZSTD_MAGIC, pos + 4)
+                    parts.append(decoder.decompress(data[pos:next_start if next_start >= 0 else size]))
+                    if decoder.eof or next_start < 0:
+                        break
+                    pos = next_start
+            except zstd.ZstdError as exc:
+                log.warning("skipping corrupt frame at byte %d of %s: %s", start, path, exc)
+                start = data.find(ZSTD_MAGIC, start + 4)
+                continue
+            content = b"".join(parts)
+            if pos != start and not _parses(content):  # a damaged frame ran on into the next good one
+                log.warning("skipping corrupt frame at byte %d of %s", start, path)
+                start = data.find(ZSTD_MAGIC, start + 4)
+                continue
+            yield content
+            start = next_start
+
+
+def read_recording(path: str | Path) -> Iterator[tuple[int, str, str]]:
+    """Yield ``(recv_ms, source, raw)``; tolerates corrupt frames and a truncated last frame or line."""
+    for frame in _frames(path):
+        for line in frame.splitlines():
+            try:
+                recv_ms, source, raw = json.loads(line)
+            except (ValueError, TypeError):
+                log.warning("skipping truncated/corrupt line in %s", path)
+                continue
+            yield int(recv_ms), source, raw
 
 
 def recording_files(directory: str | Path, start_day: str | None = None, end_day: str | None = None) -> list[Path]:

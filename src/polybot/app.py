@@ -128,7 +128,12 @@ class LiveApp:
         return dict(feeds=h["feeds"], engine=self.engine.snapshot())
 
     def report(self) -> dict[str, Any]:
-        return build_report(self.store, self.s.starting_bankroll, now_ms())
+        """Runs in a worker thread (see web.py), so it uses its own connection, never the engine's."""
+        store = Storage(self.store.path)
+        try:
+            return build_report(store, self.s.starting_bankroll, now_ms())
+        finally:
+            store.close()
 
     def reset(self) -> dict[str, Any]:
         """Wipe the paper account (dashboard button). Runs on the event loop between two engine messages,

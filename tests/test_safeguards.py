@@ -1,8 +1,10 @@
 """Book reconciliation, robust edge (sd band), model-vs-market guard, Kelly sizing and the account reset."""
 
+import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from synth import START, generate
 
@@ -10,7 +12,9 @@ from polybot.book import OrderBook
 from polybot.config import load_settings
 from polybot.engine import Engine
 from polybot.events import BookDelta, BookSnapshot, parse_raw
-from polybot.recorder import read_recording, recording_files
+from polybot.feeds import ws
+from polybot.feeds.ws import WsFeed
+from polybot.recorder import Recorder, read_recording, recording_files
 from polybot.storage import Storage
 from polybot.web import make_app
 
@@ -178,3 +182,38 @@ async def test_live_app_reset(tmp_path: Path) -> None:
     assert app.report()["bankroll"]["equity"] == 1000
     app.recorder.close()
     app.store.close()
+
+
+def test_reader_skips_corrupt_frame_and_keeps_later_data(tmp_path: Path) -> None:
+    rec = Recorder(tmp_path)
+    rec.write(1_000, "binance", "first")
+    rec.flush()
+    good = (tmp_path / "1970-01-01.jsonl.zst").read_bytes()
+    rec.close()
+    path = tmp_path / "1970-01-01.jsonl.zst"
+    # a killed process leaves half a frame; the next start appends a good frame behind it
+    path.write_bytes(good + good[: len(good) // 2] + good)
+    assert [r[2] for r in read_recording(path)] == ["first", "first"]
+
+
+async def test_backoff_resets_after_a_real_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    feed = WsFeed("t", "t", "ws://unused", asyncio.Queue())
+    clock = [0.0]
+    delays: list[float] = []
+    lifetimes = [0.0, 0.0, 0.0, 600.0, 0.0]
+
+    async def session() -> bool:
+        clock[0] += lifetimes.pop(0)
+        if not lifetimes:
+            feed.stop()
+        raise ConnectionError("kicked")
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(feed, "_session", session)
+    monkeypatch.setattr(ws.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ws.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ws.random, "random", lambda: 0.5)
+    await feed.run()
+    assert delays == [1.0, 2.0, 4.0, 1.0, 2.0]  # back to 1 s after the 600 s session

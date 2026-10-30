@@ -3,6 +3,7 @@ POST /api/reset (the only one that changes anything: it wipes the paper account)
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import time
@@ -30,7 +31,7 @@ def make_app(health: Callable[[], dict[str, Any]], report: Callable[[], dict[str
         return js(h, 200 if h.get("ok") else 503)
 
     async def h_report(_: web.Request) -> web.Response:
-        return js(report())
+        return js(await asyncio.to_thread(report))  # takes ~0.5 s: must not block the feeds
 
     async def h_state(_: web.Request) -> web.Response:
         return js(state())
