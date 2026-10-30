@@ -26,6 +26,8 @@ log = logging.getLogger("polybot.feeds")
 
 Queue = asyncio.Queue[tuple[str, int, str]]
 
+BACKOFF_RESET_AFTER_S = 30.0
+
 
 def now_ms() -> int:
     return time.time_ns() // 1_000_000
@@ -65,6 +67,7 @@ class WsFeed:
     async def run(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
+            started = time.monotonic()
             try:
                 if await self._session():
                     self.status.connected = False
@@ -75,6 +78,10 @@ class WsFeed:
             except Exception as exc:  # network errors of all kinds: reconnect
                 self.status.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 log.warning("feed %s disconnected: %s", self.name, self.status.last_error)
+            # A session that ran for a while was a real connection, so this is a new outage, not a retry
+            # of the last one. Without this every disconnect waits the full 15-45 s of the capped backoff.
+            if time.monotonic() - started >= BACKOFF_RESET_AFTER_S:
+                backoff = 1.0
             self.status.connected = False
             self._ws = None
             delay = min(backoff, 30.0) * (0.5 + random.random())

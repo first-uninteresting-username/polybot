@@ -53,8 +53,8 @@ RTDS price topics are deprecated in favour of **PolyBolt** (`wss://ws-live-v2.po
 PolyBolt requires CLOB API credentials, which come from a wallet signature, so this project must not
 use it. Since about 2026-10-29 20:21 UTC, new RTDS connections receive the 60 s history snapshot but
 **no live updates**. The RTDS feed detects this and switches to *snapshot polling*: it reconnects every
-`POLYBOT_RTDS_RESNAPSHOT_S` (5 s) and uses the fresh snapshot. Chainlink data then lags by about
-1–6 s. `/api/state` shows the feed mode as `streaming` or `snapshot_polling`. If RTDS goes away
+`POLYBOT_RTDS_RESNAPSHOT_S` (3 s) and uses the fresh snapshot. Chainlink data then lags by about
+1–4 s. `/api/state` shows the feed mode as `streaming` or `snapshot_polling`. If RTDS goes away
 entirely, the bot cannot know the strike and **stops trading** rather than guessing.
 
 ## Model (`src/polybot/model.py`, pluggable)
@@ -71,8 +71,8 @@ entirely, the bot cannot know the strike and **stops trading** rather than guess
   about $3) are added.
 * Probabilities are clipped to `[1−p_clip, p_clip]`.
 
-Calibration is tracked two ways: on traded signals, and on unselected periodic predictions (every
-10 s for every window). The second is less biased. The report shows Brier scores and a reliability
+Calibration is tracked two ways: on traded signals, and on unselected periodic predictions (stored
+every `prediction_interval_ms`, 1 s; the report samples one per 10 s for every window). The second is less biased. The report shows Brier scores and a reliability
 table for both, plus predicted vs actual win rate.
 
 ## Strategy
