@@ -155,6 +155,20 @@ class Storage:
         ).fetchone()
         return float(r[0])
 
+    def reset_trading(self, now_ms: int) -> None:
+        """Start the paper account over: drop all signals, fills, settlements and predictions and restart the
+        performance clock. Market metadata and outcomes stay (live windows still need their strikes)."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            for table in ("signals", "fills", "settlements", "predictions"):
+                self.db.execute(f"DELETE FROM {table}")
+            self.set_meta("first_start_ms", str(now_ms))
+            self.set_meta("last_reset_ms", str(now_ms))
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
     def query(self, sql: str, args: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return self.db.execute(sql, args).fetchall()
 

@@ -46,7 +46,7 @@ class Settings:
     model: str = "gbm_twap"
     vol_lookback_s: int = 900
     vol_floor_per_sqrt_s: float = 0.00003  # ~ 0.17%/sqrt(hour); floor on realized vol
-    vol_inflation: float = 1.25  # multiply realized vol (pessimistic)
+    vol_inflation: float = 1.0  # centre estimate; uncertainty is handled by model_sd_band, not by bias
     basis_halflife_s: float = 120.0
     basis_err_floor: float = 0.00005  # min stdev (log) of exchange->Chainlink basis error
     basis_err_inflation: float = 1.5
@@ -63,6 +63,11 @@ class Settings:
     max_stake_usd: float = 50.0
     starting_bankroll: float = 1000.0
     p_clip: float = 0.98  # never believe the model beyond this
+    # Inflating vol is not pessimistic for a two-sided strategy: it pulls P toward 0.5 and invents edge on
+    # the underdog. Instead, trade on the worst P(win) with sigma and basis sd scaled by 1/band .. band.
+    model_sd_band: float = 1.25  # 1 = off
+    max_model_market_gap: float = 0.20  # skip if |P(win) - token mid| is larger (likely model/data error); 0 = off
+    kelly_fraction: float = 0.25  # stake = min(stake_fraction, kelly_fraction * Kelly f*) x equity; 0 = flat
 
     # --- fill model ---
     latency_ms_floor: float = 150.0  # min simulated decision->match latency
@@ -81,6 +86,7 @@ class Settings:
     # --- misc ---
     seed: int = 1337
     latency_probe_interval_s: float = 15.0
+    admin_token: str = ""  # if set, POST /api/reset needs header X-Admin-Token with this value
 
     extra: dict[str, Any] = field(default_factory=dict)
 

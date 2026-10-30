@@ -35,6 +35,10 @@
   pre { margin:0; max-height:360px; overflow:auto; font-size:12px; }
   .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }
   .ok { color:var(--good); } .bad { color:var(--bad); }
+  #reset { margin-left:auto; font:inherit; font-size:13px; padding:4px 12px; border-radius:6px; cursor:pointer;
+           background:transparent; color:var(--bad); border:1px solid var(--bad); }
+  #reset:hover { background:var(--bad); color:var(--card); }
+  #reset:disabled { opacity:.5; cursor:wait; }
 </style>
 </head>
 <body>
@@ -43,6 +47,7 @@
   <span class="muted">Paper trading only: no orders are ever placed. Polymarket BTC Up/Down 5m.</span>
   <span id="health"></span>
   <span id="label" class="warn"></span>
+  <button id="reset" type="button" title="Delete all signals, fills, settlements and predictions">Reset database</button>
 </header>
 <main>
   <div class="tiles" id="tiles"></div>
@@ -141,6 +146,34 @@ async function refresh() {
     $("logs").textContent = logs.split("\n").reverse().join("\n");
   } catch (err) { $("health").innerHTML = `<span class="bad">dashboard fetch failed: ${esc(err)}</span>`; }
 }
+async function resetDb() {
+  if (!confirm("Reset the paper account?\n\nAll signals, fills, settlements and predictions are deleted and the " +
+               "bankroll goes back to its starting value. Recordings are kept. This cannot be undone.")) return;
+  const btn = $("reset");
+  btn.disabled = true;
+  try {
+    let token = "";
+    for (;;) {
+      const headers = {"Content-Type": "application/json"};
+      if (token) headers["X-Admin-Token"] = token;
+      const res = await fetch("/api/reset", {method: "POST", headers, body: JSON.stringify({confirm: "RESET"})});
+      const out = await res.json().catch(() => ({}));
+      if (res.status === 401 && out.token_required) {
+        token = prompt(token ? "Wrong admin token. Try again:" : "Admin token (POLYBOT_ADMIN_TOKEN):");
+        if (!token) return;
+        continue;
+      }
+      if (!res.ok || !out.ok) throw new Error(out.error || ("HTTP " + res.status));
+      break;
+    }
+    await refresh();
+  } catch (err) {
+    alert("Reset failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("reset").onclick = resetDb;
 refresh(); setInterval(refresh, 5000);
 </script>
 </body>

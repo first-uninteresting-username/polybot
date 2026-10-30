@@ -51,10 +51,13 @@ def book_msg(m: dict, asset: str, t_ms: int, bids: list[tuple[float, float]], as
     }])
 
 
-def price_change(m: dict, asset: str, t_ms: int, side: str, price: float, size: float) -> str:
+def price_change(m: dict, asset: str, t_ms: int, side: str, price: float, size: float,
+                 best_bid: float, best_ask: float) -> str:
+    """``best_bid``/``best_ask`` are the exchange's top of book after the change, as on the real feed."""
     return json.dumps({"market": m["conditionId"], "price_changes": [
         {"asset_id": asset, "price": f"{price:.2f}", "size": f"{size}", "side": side, "hash": "y",
-         "best_bid": "0.4", "best_ask": "0.6"}], "timestamp": str(t_ms), "event_type": "price_change"})
+         "best_bid": f"{best_bid:.2f}", "best_ask": f"{best_ask:.2f}"}], "timestamp": str(t_ms),
+        "event_type": "price_change"})
 
 
 def generate(seed: int = 7, drift_per_s: float = 2.0, winner: str | None = None,
@@ -62,7 +65,8 @@ def generate(seed: int = 7, drift_per_s: float = 2.0, winner: str | None = None,
     """Return a time-ordered list of ``(recv_ms, source, raw)``.
 
     BTC drifts up by ``drift_per_s`` USD/s from the strike while the Up book stays offered at 0.55, so
-    a correct model should find edge buying Up.
+    a correct model should find edge buying Up. The market is deliberately far from the model, so tests of
+    the trading mechanics turn the ``max_model_market_gap`` guard off.
     """
     rng = random.Random(seed)
     m = gamma_market()
@@ -109,7 +113,7 @@ def generate(seed: int = 7, drift_per_s: float = 2.0, winner: str | None = None,
             out.append((t + 20, "clob", book_msg(m, up, t, [(0.50, 100)], [(0.55, 40), (0.56, 200), (0.60, 500)])))
             out.append((t + 21, "clob", book_msg(m, down, t, [(0.44, 100)], [(0.48, 300), (0.50, 500)])))
         elif t % 3000 == 1000 and t >= START * 1000:
-            out.append((t + 30, "clob", price_change(m, up, t, "SELL", 0.55, 40 + (t // 1000) % 7)))
+            out.append((t + 30, "clob", price_change(m, up, t, "SELL", 0.55, 40 + (t // 1000) % 7, 0.50, 0.55)))
         t += 250
     final_sec = START + 300
     final = sum(spots[k] for k in range(final_sec - 59, final_sec + 1) if k in spots) / 60

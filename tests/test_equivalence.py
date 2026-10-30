@@ -42,7 +42,7 @@ def _dump(store) -> dict[str, list[tuple]]:
 
 
 async def test_live_equals_replay_synthetic(tmp_path: Path) -> None:
-    kw = dict(min_vol_samples=60)
+    kw = dict(min_vol_samples=60, max_model_market_gap=0)
     records = generate()
     app = await _run_live(tmp_path, records, **kw)
     live = _dump(app.store)

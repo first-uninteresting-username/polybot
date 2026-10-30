@@ -130,6 +130,15 @@ class LiveApp:
     def report(self) -> dict[str, Any]:
         return build_report(self.store, self.s.starting_bankroll, now_ms())
 
+    def reset(self) -> dict[str, Any]:
+        """Wipe the paper account (dashboard button). Runs on the event loop between two engine messages,
+        so it cannot interleave with event processing. Recordings are kept; a replay ignores the reset."""
+        ts = now_ms()
+        self.store.reset_trading(ts)
+        self.engine.reset_trading()
+        log.warning("paper account reset from the dashboard; bankroll back to %.2f", self.s.starting_bankroll)
+        return dict(ok=True, reset_ms=ts, bankroll=self.s.starting_bankroll)
+
     def signals(self, limit: int) -> list[dict[str, Any]]:
         rows = self.store.query(
             "SELECT s.*, f.net_shares, f.cost, f.fee, st.pnl, st.settled_by FROM signals s "
@@ -139,7 +148,8 @@ class LiveApp:
 
     async def run(self) -> None:
         log.info("polybot starting (PAPER TRADING ONLY - no orders are ever sent)")
-        runner = web.AppRunner(make_app(self.health, self.report, self.state, self.signals))
+        runner = web.AppRunner(make_app(self.health, self.report, self.state, self.signals,
+                                           self.reset, self.s.admin_token))
         await runner.setup()
         await web.TCPSite(runner, self.s.http_host, self.s.http_port).start()
         log.info("http listening on %s:%s", self.s.http_host, self.s.http_port)

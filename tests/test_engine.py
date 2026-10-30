@@ -9,7 +9,7 @@ from polybot.engine import Engine
 from polybot.replay import replay
 from polybot.storage import Storage
 
-S = load_settings(env={}, min_vol_samples=60, fallback_after_s=600)
+S = load_settings(env={}, min_vol_samples=60, fallback_after_s=600, max_model_market_gap=0)
 
 
 def run(records, store=None):

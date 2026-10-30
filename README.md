@@ -21,7 +21,7 @@ Gamma resolution ──┤                             ├─ strategy: edge aft
 CLOB RTT probe ────┘                             ├─ fill simulator (after latency, book walk)
                                                  ├─ settlement on Polymarket's outcome
                                                  └─ SQLite (signals, fills, settlements, predictions)
-web: /  /health  /report  /api/state  /api/signals  /logs
+web: /  /health  /report  /api/state  /api/signals  /logs  POST /api/reset
 ```
 
 * Every input, including market metadata, resolutions and latency samples, goes through one queue,
@@ -59,8 +59,8 @@ entirely, the bot cannot know the strike and **stops trading** rather than guess
 
 ## Model (`src/polybot/model.py`, pluggable)
 
-`gbm_twap`: driftless Brownian log-price with realized vol, floored and inflated by
-`vol_inflation`. The final TWAP is approximated as the mean of Chainlink spot over the last 60 s:
+`gbm_twap`: driftless Brownian log-price with realized vol, floored (and multiplied by
+`vol_inflation`, 1.0 by default: the central estimate is not deliberately biased). The final TWAP is approximated as the mean of Chainlink spot over the last 60 s:
 
 * With more than 60 s left: `log F − x_now ~ N(0, σ²((τ−60) + 60/3))`.
 * Inside the final minute: the Chainlink prints already observed in the averaging window are known
@@ -81,14 +81,25 @@ Every `eval_interval_ms` of event time, for each live window with a known strike
 
 * **Filters:** `min_tau_s ≤ τ ≤ max_tau_s`, every feed fresh, at least 5 latency samples, fewer than
   `max_entries_per_market` entries in this window.
-* **Edge:** for each outcome, `edge = P(win) − all-in cost per share at the best ask`, with the fee
-  taken in shares.
+* **Worst-case P(win):** the model is also run with sigma and basis sd scaled by `1/model_sd_band`
+  and `model_sd_band` (1.25). Each outcome uses the lowest of the three P(win). Inflating vol is *not*
+  a pessimistic choice for a strategy that can buy either side: it pulls P toward 0.5 and invents edge
+  on the underdog. The band is pessimistic for both sides. The signal records the central P(win)
+  (used for calibration) and the worst-case edge.
+* **Edge:** for each outcome, `edge = worst-case P(win) − all-in cost per share at the best ask`, with
+  the fee taken in shares.
+* **Model vs market:** an outcome is skipped (`skip_model_market_gap`) if the central P(win) is more than
+  `max_model_market_gap` (0.20) from the token's mid. A liquid market that far from the model is far
+  more often a model or data error (wrong strike, stale oracle) than free money.
 * **Signal:** if `edge ≥ min_edge` and the book can fill at least `orderMinSize` within the limit, a
   simulated fill-and-kill buy is sent with `limit = min(ask + limit_slippage_ticks, highest price
   still meeting min_edge)`.
-* **Stake:** `min(stake_fraction × equity, max_stake_usd, free cash)`.
+* **Stake:** `min(f × equity, max_stake_usd, free cash)` with
+  `f = min(stake_fraction, kelly_fraction × (p − c)/(1 − c))`, the Kelly fraction for worst-case
+  P(win) `p` and all-in cost `c` at the limit. Thin edges get small stakes. `kelly_fraction=0` gives a
+  flat `stake_fraction`.
 
-Optional maker mode (`enable_maker`, off by default) rests a bid at `P(win) − min_edge`.
+Optional maker mode (`enable_maker`, off by default) rests a bid at `worst-case P(win) − min_edge`.
 
 ## How fills are simulated
 
@@ -98,7 +109,11 @@ Optional maker mode (`enable_maker`, off by default) rests a bid at `P(win) − 
    a floor of 150 ms. The draw is seeded from the signal id, so it is deterministic.
 2. **Book at arrival.** The order executes at the first event at or after `decision + latency`,
    against the book as it was at that moment, before that event is applied. The book is rebuilt from
-   the CLOB websocket `book` and `price_change` events.
+   the CLOB websocket `book` and `price_change` events. Each `price_change` also carries the exchange's
+   best bid/ask; levels better than that are phantom liquidity from a missed update (trades remove
+   levels without a `price_change`) and are dropped. If we lack the reported level itself, the book is
+   flagged (`skip_book_desync`) until the next snapshot. On the saved live capture this makes the
+   reconstructed top of book match the exchange on all of about 17,000 updates (it was 12 off before).
 3. **Book walk.** Asks are walked from the best price up to the limit, level by level, with partial
    fills. Only `book_take_fraction` (0.5) of each displayed level is assumed available, because
    other takers race for it. Sizes are floored to 0.01 shares, the order must be at least
@@ -128,6 +143,16 @@ Optional maker mode (`enable_maker`, off by default) rests a bid at `P(win) − 
 * A `STATISTICALLY MEANINGLESS SAMPLE` label until both the trade count reaches the 80%-power
   requirement and 7 days have passed.
 
+### Resetting the paper account
+
+The dashboard's **Reset database** button (`POST /api/reset` with JSON body `{"confirm": "RESET"}`)
+deletes all signals, fills, settlements and predictions, puts the bankroll back to
+`starting_bankroll` and restarts the %/day clock. Market metadata and outcomes are kept, because live
+windows still need their strikes. Recordings are untouched, so a replay still covers the full
+history. The endpoint only accepts `application/json`, which a cross-site form cannot send. **If the
+dashboard is reachable from the internet, set `POLYBOT_ADMIN_TOKEN`**: the endpoint then requires it
+in the `X-Admin-Token` header, and the button asks for it.
+
 ## Known optimistic biases
 
 The simulation still flatters results in these ways:
@@ -137,8 +162,9 @@ The simulation still flatters results in these ways:
 2. **Latency is an HTTPS GET round trip,** not a real order POST with EIP-712 signing and matching
    engine time. The 50 ms extra and 150 ms floor are guesses. A real bot also needs the order *ack*
    before it knows it filled.
-3. **Book reconstruction:** if we miss a websocket message, our book can show liquidity that is gone.
-   We resync only on `book` snapshots. The book we see is also already one feed delay old.
+3. **Book reconstruction:** if we miss a websocket message, depth *behind* the best level can still be
+   wrong until the next `book` snapshot (only the top of book is checked against the exchange). The
+   book we see is also already one feed delay old.
 4. **Queue position for maker orders** is modelled conservatively, but cancellations ahead of us and
    hidden size are ignored. Maker mode is off by default.
 5. **Fee assumptions:** `exponent` other than 1 is applied as `(p(1−p))^exponent`, which is
@@ -167,7 +193,11 @@ environment, or in a TOML file named by `POLYBOT_CONFIG`. The most relevant:
 | `POLYBOT_STARTING_BANKROLL` | 1000 | paper bankroll (USDC) |
 | `POLYBOT_BOOK_TAKE_FRACTION` | 0.5 | share of displayed depth we may take |
 | `POLYBOT_LATENCY_EXTRA_MS` / `_FLOOR` | 50 / 150 | latency model |
-| `POLYBOT_VOL_INFLATION` / `POLYBOT_BASIS_ERR_INFLATION` | 1.25 / 1.5 | model pessimism |
+| `POLYBOT_VOL_INFLATION` / `POLYBOT_BASIS_ERR_INFLATION` | 1.0 / 1.5 | vol bias (keep at 1) / basis error floor |
+| `POLYBOT_MODEL_SD_BAND` | 1.25 | trade on the worst P(win) over sd × [1/band, band] |
+| `POLYBOT_MAX_MODEL_MARKET_GAP` | 0.20 | skip if the model is this far from the mid (0 = off) |
+| `POLYBOT_KELLY_FRACTION` | 0.25 | stake cap as a fraction of Kelly (0 = flat stake) |
+| `POLYBOT_ADMIN_TOKEN` | empty | required by the reset button if set |
 | `POLYBOT_STALE_EXCHANGE_MS` / `_BOOK_MS` / `_ORACLE_MS` | 2000 / 5000 / 12000 | skip trading if older |
 | `POLYBOT_ENABLE_MAKER` | false | simulate resting bids |
 | `POLYBOT_RECORD_RETENTION_DAYS` | 14 | about 3 GB/day compressed |
