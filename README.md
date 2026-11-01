@@ -4,9 +4,11 @@
 private keys, no API credentials and calls no authenticated endpoint. Every "trade" is a simulation
 against the live public order book.
 
-It measures, as honestly as it can, whether a simple model-driven strategy on Polymarket's
-`btc-updown-5m-<start>` markets would make money after fees, latency and slippage. Read the results
-with the sections [How fills are simulated](#how-fills-are-simulated) and
+It measures, as honestly as it can, whether model-driven strategies on Polymarket's
+`btc-updown-5m-<start>` markets would make money after fees, latency and slippage. Several agents trade
+side by side from **one shared paper bankroll**: the original hand-built strategy (`gbm_twap`) and two
+agents that learn online from every window's outcome (`rl_wide` with about 25 inputs, `rl_core` with 5).
+Read the results with the sections [How fills are simulated](#how-fills-are-simulated) and
 [Known optimistic biases](#known-optimistic-biases) in mind.
 
 ## What it does
@@ -17,11 +19,12 @@ Coinbase ticker ws ┤                       ┌─> recorder (zstd JSONL, daily
 Polymarket RTDS ───┼─> asyncio queue ──────┤
 CLOB market ws ────┤   (recv_ms, src, raw) └─> Engine (deterministic, event time)
 Gamma discovery ───┤                             ├─ model: P(Up)
-Gamma resolution ──┤                             ├─ strategy: edge after fees
-CLOB RTT probe ────┘                             ├─ fill simulator (after latency, book walk)
-                                                 ├─ settlement on Polymarket's outcome
-                                                 └─ SQLite (signals, fills, settlements, predictions)
-web: /  /health  /report  /api/state  /api/signals  /logs  POST /api/reset
+Gamma resolution ──┤                             ├─ agents: gbm_twap, rl_wide, rl_core (one bankroll)
+CLOB RTT probe ────┤                             ├─ fill simulator (after latency, book walk)
+Dashboard top-up ──┘                             ├─ settlement on Polymarket's outcome, then learning
+                                                 └─ SQLite (signals, fills, settlements, predictions,
+                                                            deposits, learned agent state)
+web: /  /health  /report  /api/state  /api/signals  /logs  POST /api/reset  POST /api/topup
 ```
 
 * Every input, including market metadata, resolutions and latency samples, goes through one queue,
@@ -75,7 +78,17 @@ Calibration is tracked two ways: on traded signals, and on unselected periodic p
 every `prediction_interval_ms`, 1 s; the report samples one per 10 s for every window). The second is less biased. The report shows Brier scores and a reliability
 table for both, plus predicted vs actual win rate.
 
-## Strategy
+## Agents and the shared bankroll
+
+`POLYBOT_AGENTS` (default `gbm_twap,rl_wide,rl_core`) lists the agents that trade. They all use the same
+money: one cash pool (starting bankroll + top-ups − costs + payouts) sizes every stake, so an open position
+of one agent leaves less cash for the others, and every agent's Kelly stake is a fraction of the same
+equity. Each agent has its own per-market entry limit and its own orders in flight. Signals and fills carry
+the `agent` that made them, so the report attributes the shared P&L per agent. Remove an agent from the list
+to stop it trading. With only `gbm_twap` listed the engine makes exactly the decisions it made before agents
+existed (`tests/test_rl.py` pins them).
+
+## Strategy of `gbm_twap` (the original)
 
 Every `eval_interval_ms` of event time, for each live window with a known strike:
 
@@ -101,6 +114,46 @@ Every `eval_interval_ms` of event time, for each live window with a known strike
 
 Optional maker mode (`enable_maker`, off by default) rests a bid at `worst-case P(win) − min_edge`.
 
+## Learning agents `rl_wide` and `rl_core` (`src/polybot/rl.py`)
+
+Each window offers the same choice the original strategy has: skip, buy Up or buy Down, through the same
+filters (freshness, latency samples, `min_tau_s`..`max_tau_s`, model-vs-market gap, one entry per market),
+the same Kelly-capped sizing and the same fill simulator. The value of buying a side is
+`P(side wins | inputs) − all-in cost`, so the agent learns `P(Up | inputs)`.
+
+* **Inputs.** `rl_wide` uses about 25 (`rl.FEATURES`): the `gbm_twap` P(Up) (logit and z-score), the
+  market's P(Up) (mean of the Up mid and one minus the Down mid), time left and the share of the TWAP already
+  known, their interactions, spread, overround, top-of-book and 3-tick depth imbalance, the last trade vs the
+  mid, realized vol (15 min and its 60 s ratio), exchange momentum over 5–120 s, Binance vs Coinbase
+  disagreement, basis error, and the age of the last Chainlink print and the move since. `rl_core` uses 5:
+  the model's and the market's logit, each also times the time left, and a bias. Everything is computed from
+  data already received (no look-ahead), once per `rl_decision_interval_ms` (1 s) per window.
+* **Model and learning.** Bayesian logistic regression with a full-covariance Gaussian posterior. When the
+  official outcome of a window arrives (the reward signal), every agent learns from the window's samples
+  (one per `rl_sample_interval_ms`, 5 s) in one Laplace/Newton step. The samples share one outcome, so
+  together they count as a single observation. The precision relaxes towards the prior over
+  `rl_memory_windows` (about a week), so the agents keep adapting. The prior is half the `gbm_twap` logit plus
+  half the market's logit, every other weight 0, with sd `rl_prior_sd`. Because a window's outcome is known
+  whether or not the agent traded, the counterfactual reward of every action is observed: no random,
+  deliberately losing exploration trades are needed.
+* **Policy.** No trading before `rl_min_windows` (100, about 8 hours) windows have been learned. Then each
+  side is judged on the pessimistic end of the posterior, `sigmoid(mean − rl_pessimism × sd)` for Up and
+  `1 − sigmoid(mean + rl_pessimism × sd)` for Down, so an agent that knows little does not trade, and this is
+  pessimistic for both sides. The trade must clear `rl_min_edge` plus a learned penalty.
+* **Learning from its own trades.** For the first trade its policy would make in each window (placed or
+  not), the agent compares the outcome with the predicted P(win). If those selected trades win less often
+  than predicted (winner's curse, adverse selection), the shortfall, shrunk by `rl_bias_prior_trades`, is
+  added to the edge it requires. Good luck never lowers the bar.
+* **Persistence.** The learned state is saved in SQLite (`rl_state`) after every update, so restarts and
+  redeploys keep it, and it survives the dashboard reset (it is knowledge about markets, not money). State
+  learned on a different input list is discarded. Replay learns from scratch along the recording, exactly
+  as live does (`tests/test_equivalence.py`).
+
+The report and dashboard score the market, `gbm_twap` and each agent on the same moments (Brier and log
+loss), which shows directly whether any model knows more than the market's own prices. A learning agent can
+only find edge that its inputs carry; if the market already prices them in, the expected result is that it
+learns to follow the market and rarely trades.
+
 ## How fills are simulated
 
 1. **Latency.** At signal time, a latency is drawn from the bot's own measured HTTPS round-trip times
@@ -117,7 +170,9 @@ Optional maker mode (`enable_maker`, off by default) rests a bid at `worst-case 
 3. **Book walk.** Asks are walked from the best price up to the limit, level by level, with partial
    fills. Only `book_take_fraction` (0.5) of each displayed level is assumed available, because
    other takers race for it. Sizes are floored to 0.01 shares, the order must be at least
-   `orderMinSize`, and the unfilled rest is cancelled.
+   `orderMinSize`, and the unfilled rest is cancelled. Our paper fills never reach the exchange, so its
+   book keeps showing shares we already took: every later order in that market (any agent) sees each level
+   minus what our own orders took there, so two agents never both take half of the same shares.
 4. **Fees per level.** `C × rate × p(1−p)`, rounded **up** to 5 dp, collected in shares:
    net shares = C − fee/p.
 5. **Maker orders** (optional): assumed to sit at the back of the queue, filled only when a trade
@@ -131,9 +186,13 @@ Optional maker mode (`enable_maker`, off by default) rests a bid at `worst-case 
 
 ## Reporting (`/report`, dashboard `/`)
 
-* P&L after fees and fees paid.
+* P&L after fees and fees paid, per agent as well (one shared account, P&L attributed by agent).
 * %/day compounded over total wall-clock time since first start, including idle and down time,
-  with open positions valued at cost.
+  with open positions valued at cost. Time-weighted: each settled trade's return is its P&L over the
+  equity at that moment, so top-ups are never counted as returns (the same holds for drawdown).
+* Models vs market: Brier score and log loss of the market's P(Up), `gbm_twap` and each learning agent,
+  sampled at the same moments (one per 30 s of each window, last 7 days); learning status and largest
+  weights of each agent.
 * Win rate vs predicted, trade count, max drawdown, per-day P&L.
 * Bootstrap 95% CI of the daily return (trade-level resample × trades/day; day-level once there
   are 5 or more days).
@@ -143,15 +202,24 @@ Optional maker mode (`enable_maker`, off by default) rests a bid at `worst-case 
 * A `STATISTICALLY MEANINGLESS SAMPLE` label until both the trade count reaches the 80%-power
   requirement and 7 days have passed.
 
+### Topping up the paper account
+
+The dashboard's **Top up** button (`POST /api/topup` with JSON body `{"amount": 1000}`, at most 10,000,000)
+adds paper USDC to the bankroll all agents share, for example when learning agents have spent it. The
+deposit enters the engine as an input event like any other, so it is recorded and a replay applies it at
+the same moment. It raises cash and equity, never P&L or %/day.
+
 ### Resetting the paper account
 
 The dashboard's **Reset database** button (`POST /api/reset` with JSON body `{"confirm": "RESET"}`)
-deletes all signals, fills, settlements and predictions, puts the bankroll back to
+deletes all signals, fills, settlements, predictions and top-ups, puts the bankroll back to
 `starting_bankroll` and restarts the %/day clock. Market metadata and outcomes are kept, because live
-windows still need their strikes. Recordings are untouched, so a replay still covers the full
-history. The endpoint only accepts `application/json`, which a cross-site form cannot send. **If the
-dashboard is reachable from the internet, set `POLYBOT_ADMIN_TOKEN`**: the endpoint then requires it
-in the `X-Admin-Token` header, and the button asks for it.
+windows still need their strikes, and so is what the learning agents have learned. Recordings are
+untouched, so a replay still covers the full history (including every top-up).
+
+Both endpoints only accept `application/json`, which a cross-site form cannot send. **If the dashboard is
+reachable from the internet, set `POLYBOT_ADMIN_TOKEN`**: both then require it in the `X-Admin-Token`
+header, and the buttons ask for it.
 
 ## Known optimistic biases
 
@@ -173,7 +241,10 @@ The simulation still flatters results in these ways:
    `min_tau_s` = 15 s). Geographic restrictions (`restricted: true`) are ignored: you may not legally
    be able to trade these markets at all.
 7. **Selection in the model:** vol floor, inflation and basis-error parameters were set by hand, not
-   fitted out of sample. Any later tuning on the same recordings overfits.
+   fitted out of sample, and so were the learning agents' prior, pessimism, warm-up and memory. Any later
+   tuning on the same recordings overfits. The learning agents' weights themselves are always learned out
+   of sample (from earlier windows only), and their calibration is scored on predictions made before the
+   outcome was known.
 8. **Small sample:** 5-minute binary outcomes are very noisy. See `trades_needed_80pct_power`.
 9. **Restarts:** simulated orders in flight at a restart are cancelled (neutral), and the current
    window may be skipped because the strike is unknown (conservative).
@@ -197,6 +268,11 @@ environment, or in a TOML file named by `POLYBOT_CONFIG`. The most relevant:
 | `POLYBOT_MODEL_SD_BAND` | 1.25 | trade on the worst P(win) over sd × [1/band, band] |
 | `POLYBOT_MAX_MODEL_MARKET_GAP` | 0.20 | skip if the model is this far from the mid (0 = off) |
 | `POLYBOT_KELLY_FRACTION` | 0.25 | stake cap as a fraction of Kelly (0 = flat stake) |
+| `POLYBOT_AGENTS` | `gbm_twap,rl_wide,rl_core` | agents that trade, all from the same bankroll |
+| `POLYBOT_RL_MIN_EDGE` | 0.03 | learning agents: required pessimistic P(win) − all-in cost |
+| `POLYBOT_RL_PESSIMISM` | 1.0 | decide on the posterior mean logit minus this many sd |
+| `POLYBOT_RL_MIN_WINDOWS` | 100 | windows to learn from before an agent may trade |
+| `POLYBOT_RL_PRIOR_SD` / `POLYBOT_RL_MEMORY_WINDOWS` | 0.25 / 2016 | prior sd of each weight / forgetting horizon |
 | `POLYBOT_ADMIN_TOKEN` | empty | required by the reset button if set |
 | `POLYBOT_STALE_EXCHANGE_MS` / `_BOOK_MS` / `_ORACLE_MS` | 2000 / 5000 / 12000 | skip trading if older |
 | `POLYBOT_ENABLE_MAKER` | false | simulate resting bids |

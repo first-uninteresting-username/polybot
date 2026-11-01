@@ -1,4 +1,9 @@
-"""Honest performance report computed from the SQLite store."""
+"""Honest performance report computed from the SQLite store.
+
+All agents share one paper account. Top-ups (deposits) add to cash and equity but are not returns: the
+%/day, drawdown and per-trade returns are time-weighted, i.e. each settled trade's P&L is divided by the
+equity at that moment (deposits included), and those returns are compounded.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,8 @@ from .storage import Storage
 Z95 = 1.959964
 Z80_POWER = 0.841621
 CALIBRATION_SAMPLE_MS = 10_000  # one prediction per 10 s: neighbours add load, not information
+SCORE_SAMPLE_MS = 30_000  # models-vs-market scoreboard: one sample per 30 s of each window ...
+SCORE_DAYS = 7  # ... over the last 7 days (the learning agents change; recent scores matter)
 
 
 def _day(ms: int) -> str:
@@ -42,6 +49,86 @@ def _reliability(pairs: list[tuple[float, int]], bins: int = 10) -> list[dict[st
     return out
 
 
+def _log_loss(pairs: list[tuple[float, int]]) -> float | None:
+    if not pairs:
+        return None
+    eps = 1e-6
+    return -sum(math.log(min(max(p if o else 1.0 - p, eps), 1.0)) for p, o in pairs) / len(pairs)
+
+
+def _agents(trades: list[Any], signals: list[Any]) -> list[dict[str, Any]]:
+    """Per-agent results; the money is shared, so these are attributions of one account's P&L."""
+    acc: dict[str, dict[str, Any]] = {}
+
+    def row(agent: str) -> dict[str, Any]:
+        return acc.setdefault(agent, dict(agent=agent, signals=0, by_status=defaultdict(int), filled=0, settled=0,
+                                          open=0, wins=0, pnl=0.0, fees=0.0, staked=0.0, pairs=[]))
+
+    for sg in signals:
+        a = row(sg["agent"])
+        a["signals"] += 1
+        a["by_status"][sg["status"]] += 1
+    for t in trades:
+        a = row(t["agent"])
+        a["filled"] += 1
+        a["fees"] += float(t["fee"])
+        if t["settled_by"] is None:
+            a["open"] += 1
+            continue
+        a["settled"] += 1
+        a["wins"] += int(t["won"])
+        a["pnl"] += float(t["pnl"])
+        a["staked"] += float(t["cost"])
+        a["pairs"].append((float(t["p_win_decision"]), int(t["won"])))
+    out = []
+    for name in sorted(acc):
+        a = acc[name]
+        pairs = a.pop("pairs")
+        n = a["settled"]
+        out.append(dict(a, by_status=dict(a["by_status"]), pnl=round(a["pnl"], 4), fees=round(a["fees"], 5),
+                        staked=round(a["staked"], 4), win_rate=(a["wins"] / n) if n else None,
+                        predicted_win_rate=statistics.fmean(p for p, _ in pairs) if pairs else None,
+                        return_on_staked=(a["pnl"] / a["staked"]) if a["staked"] > 0 else None,
+                        brier_traded=_brier(pairs)))
+    return out
+
+
+def _model_scores(store: Storage, now_ms: int) -> dict[str, Any]:
+    """Calibration of every predictor sampled together (the market's own P(Up), gbm_twap and each RL agent):
+    the same windows at the same moments, so the scores are comparable. Lower is better."""
+    rows = store.query(
+        "SELECT a.agent, a.p_up, m.winner = 'Up' FROM agent_predictions a JOIN markets m ON m.slug=a.slug "
+        f"WHERE m.winner IN ('Up','Down') AND a.ts_ms >= ? AND a.ts_ms % {SCORE_SAMPLE_MS} = 0",
+        (now_ms - SCORE_DAYS * 86_400_000,),
+    )
+    by: dict[str, list[tuple[float, int]]] = defaultdict(list)
+    for agent, p_up, up in rows:
+        by[agent].append((float(p_up), int(up)))
+    return dict(
+        note=f"P(Up) of each predictor at the same moments (one per {SCORE_SAMPLE_MS // 1000} s of the live windows "
+             f"the agents could trade, last {SCORE_DAYS} days), settled on the official outcome. 'market' is the mid "
+             "of the Up and Down books.",
+        rows=[dict(model=k, n=len(v), brier=_brier(v), log_loss=_log_loss(v), table=_reliability(v))
+              for k, v in sorted(by.items())],
+    )
+
+
+def _rl_status(store: Storage) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for r in store.query("SELECT agent, state, updated_ms FROM rl_state ORDER BY agent"):
+        try:
+            st = json.loads(r["state"])
+            lr = st["learner"]
+            weights = {k: round(float(w), 4) for k, w in zip(lr["names"], lr["mean"], strict=True)}
+            out[r["agent"]] = dict(windows_learned=int(lr["windows"]), updated_ms=r["updated_ms"], weights=weights,
+                                   judged_trades=round(float(st["bias_n"]), 2),
+                                   mean_outcome_minus_predicted=(float(st["bias_sum"]) / float(st["bias_n"])
+                                                                 if float(st["bias_n"]) > 0 else None))
+        except (ValueError, KeyError, TypeError):
+            out[r["agent"]] = dict(error="unreadable state")
+    return out
+
+
 def build_report(store: Storage, starting_bankroll: float, now_ms: int, target_daily: float = 0.005,
                  n_boot: int = 2000) -> dict[str, Any]:
     first_start = int(store.get_meta("first_start_ms") or now_ms)
@@ -54,25 +141,38 @@ def build_report(store: Storage, starting_bankroll: float, now_ms: int, target_d
     settled = [t for t in trades if t["settled_by"] is not None]
     open_ = [t for t in trades if t["settled_by"] is None]
 
+    deposits = store.query("SELECT id, ts_ms, amount FROM deposits ORDER BY ts_ms, id")
+    deposited = sum(float(d["amount"]) for d in deposits)
     cash = store.cash(starting_bankroll)
     open_cost = sum(float(t["cost"]) for t in open_)
-    equity = cash + open_cost  # open positions valued at cost
+    equity = cash + open_cost  # open positions valued at cost; includes deposits
     total_pnl = sum(float(t["pnl"]) for t in settled)
     fees = sum(float(t["fee"]) for t in trades)
 
-    growth = equity / starting_bankroll
-    pct_day = (growth ** (1 / elapsed_days) - 1) if growth > 0 else -1.0
-
-    # equity curve on settlement order, drawdown
-    eq, peak, max_dd = starting_bankroll, starting_bankroll, 0.0
+    # Account equity curve (deposits show as steps) and the time-weighted growth index (deposits excluded):
+    # every settled trade's return is its P&L over the equity at that moment.
+    srt = sorted(settled, key=lambda r: r["settle_ms"])
+    flows = sorted([(int(d["ts_ms"]), 0, i, float(d["amount"])) for i, d in enumerate(deposits)]
+                   + [(int(t["settle_ms"]), 1, i, float(t["pnl"])) for i, t in enumerate(srt)])
+    eq, growth, peak, max_dd = starting_bankroll, 1.0, 1.0, 0.0
     curve = [(first_start, eq)]
     per_trade_ret: list[float] = []
-    for t in sorted(settled, key=lambda r: r["settle_ms"]):
-        per_trade_ret.append(float(t["pnl"]) / eq)
-        eq += float(t["pnl"])
-        peak = max(peak, eq)
-        max_dd = max(max_dd, (peak - eq) / peak)
-        curve.append((int(t["settle_ms"]), round(eq, 4)))
+    day_growth: dict[str, float] = defaultdict(lambda: 1.0)
+    for ts, kind, _, x in flows:
+        if kind == 1:
+            r = x / eq if eq > 0 else 0.0
+            per_trade_ret.append(r)
+            growth *= 1.0 + r
+            day_growth[_day(ts)] *= 1.0 + r
+            peak = max(peak, growth)
+            if peak > 0:
+                max_dd = max(max_dd, (peak - growth) / peak)
+        eq += x
+        curve.append((ts, round(eq, 4)))
+    try:
+        pct_day: float | None = (growth ** (1 / elapsed_days) - 1) if growth > 0 else -1.0
+    except OverflowError:  # a gain over a tiny elapsed time (e.g. just after a reset) has no meaningful rate
+        pct_day = None
 
     per_day: dict[str, dict[str, float]] = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "fees": 0.0})
     for t in settled:
@@ -120,16 +220,13 @@ def build_report(store: Storage, starting_bankroll: float, now_ms: int, target_d
             boot["days_needed_at_current_rate"] = round(boot["trades_needed_80pct_power"] / trades_per_day, 1)
     days = sorted(per_day)
     if len(days) >= 5:
-        rets, e = [], starting_bankroll
-        for day in days:
-            rets.append(per_day[day]["pnl"] / e)
-            e += per_day[day]["pnl"]
+        rets = [day_growth[day] - 1.0 for day in days]
         rng = random.Random(1)
         sims = sorted(statistics.fmean(rng.choice(rets) for _ in rets) for _ in range(n_boot))
         boot["day_level"] = dict(days=len(rets), mean=statistics.fmean(rets),
                                  ci95=[sims[int(0.025 * n_boot)], sims[int(0.975 * n_boot) - 1]])
 
-    signals = store.query("SELECT kind, status, detail, latency_ms FROM signals")
+    signals = store.query("SELECT agent, kind, status, detail, latency_ms FROM signals")
     done = [s for s in signals if s["status"] not in ("pending", "resting")]
     vanished = 0
     for s in done:
@@ -159,11 +256,15 @@ def build_report(store: Storage, starting_bankroll: float, now_ms: int, target_d
                "STATISTICALLY MEANINGLESS SAMPLE - do not draw conclusions from these numbers"),
         generated_ms=now_ms,
         elapsed_days=round(elapsed_days, 4),
-        bankroll=dict(start=starting_bankroll, cash=round(cash, 4), open_cost=round(open_cost, 4),
-                      equity=round(equity, 4)),
+        bankroll=dict(start=starting_bankroll, deposits=round(deposited, 4), cash=round(cash, 4),
+                      open_cost=round(open_cost, 4), equity=round(equity, 4), shared_by_all_agents=True),
+        deposits=[dict(ts_ms=int(d["ts_ms"]), amount=float(d["amount"])) for d in deposits][-100:],
         pnl=dict(settled_after_fees=round(total_pnl, 4), fees_paid=round(fees, 5),
                  pct_per_day_compounded_wallclock=pct_day, target_pct_per_day=target_daily,
-                 max_drawdown=max_dd),
+                 max_drawdown=max_dd, note="time-weighted: deposits are not counted as returns"),
+        agents=_agents(list(trades), list(signals)),
+        model_scores=_model_scores(store, now_ms),
+        rl=_rl_status(store),
         trades=dict(filled=len(trades), settled=n, open=len(open_), wins=wins,
                     win_rate=(wins / n) if n else None,
                     predicted_win_rate_decision=statistics.fmean(pred_dec) if pred_dec else None,

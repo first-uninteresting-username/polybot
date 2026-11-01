@@ -21,6 +21,9 @@ SRC_RTDS = "rtds"
 SRC_GAMMA_MARKET = "gamma_market"  # a Gamma /markets object (JSON)
 SRC_RESOLUTION = "resolution"  # a Gamma /events object for a finished window (JSON)
 SRC_LATENCY = "latency"  # {"rtt_ms": float} from our own CLOB round-trip probe
+SRC_DEPOSIT = "deposit"  # {"id": str, "amount": float}: paper money added with the dashboard's top-up button
+
+MAX_DEPOSIT_USDC = 10_000_000.0  # a sanity bound on one top-up of the paper account
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +115,13 @@ class LatencySample:
     rtt_ms: float
 
 
+@dataclass(frozen=True, slots=True)
+class Deposit:
+    recv_ms: int
+    deposit_id: str
+    amount: float  # USDC added to the shared paper bankroll
+
+
 Event = (
     PriceTick
     | OracleTick
@@ -122,6 +132,7 @@ Event = (
     | MarketInfo
     | Resolution
     | LatencySample
+    | Deposit
 )
 
 
@@ -294,6 +305,21 @@ def parse_latency(recv_ms: int, raw: str) -> list[Event]:
     return [LatencySample(recv_ms, float(json.loads(raw)["rtt_ms"]))]
 
 
+def parse_deposit(recv_ms: int, raw: str) -> list[Event]:
+    d = json.loads(raw)
+    amount = d["amount"]
+    if isinstance(amount, bool) or not isinstance(amount, int | float):
+        raise TypeError("deposit amount must be a number")
+    # Compare before converting: also rejects NaN, infinities and integers too large for a float.
+    if not 0 < amount <= MAX_DEPOSIT_USDC:
+        raise ValueError("deposit amount out of range")
+    amount = float(amount)
+    dep_id = d["id"]
+    if not isinstance(dep_id, str) or not dep_id:
+        raise ValueError("deposit id must be a non-empty string")
+    return [Deposit(recv_ms, dep_id, amount)]
+
+
 _PARSERS = {
     SRC_BINANCE: parse_binance,
     SRC_COINBASE: parse_coinbase,
@@ -302,6 +328,7 @@ _PARSERS = {
     SRC_GAMMA_MARKET: parse_gamma_market,
     SRC_RESOLUTION: parse_resolution,
     SRC_LATENCY: parse_latency,
+    SRC_DEPOSIT: parse_deposit,
 }
 
 

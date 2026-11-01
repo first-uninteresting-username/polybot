@@ -35,10 +35,12 @@
   pre { margin:0; max-height:360px; overflow:auto; font-size:12px; }
   .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }
   .ok { color:var(--good); } .bad { color:var(--bad); }
-  #reset { margin-left:auto; font:inherit; font-size:13px; padding:4px 12px; border-radius:6px; cursor:pointer;
-           background:transparent; color:var(--bad); border:1px solid var(--bad); }
+  .act { font:inherit; font-size:13px; padding:4px 12px; border-radius:6px; cursor:pointer; background:transparent; }
+  .act:disabled { opacity:.5; cursor:wait; }
+  #topup { margin-left:auto; color:var(--series); border:1px solid var(--series); }
+  #topup:hover { background:var(--series); color:var(--card); }
+  #reset { color:var(--bad); border:1px solid var(--bad); }
   #reset:hover { background:var(--bad); color:var(--card); }
-  #reset:disabled { opacity:.5; cursor:wait; }
 </style>
 </head>
 <body>
@@ -47,7 +49,8 @@
   <span class="muted">Paper trading only: no orders are ever placed. Polymarket BTC Up/Down 5m.</span>
   <span id="health"></span>
   <span id="label" class="warn"></span>
-  <button id="reset" type="button" title="Delete all signals, fills, settlements and predictions">Reset database</button>
+  <button id="topup" class="act" type="button" title="Add paper money to the bankroll all agents share">Top up</button>
+  <button id="reset" class="act" type="button" title="Delete all signals, fills, settlements, predictions and deposits">Reset database</button>
 </header>
 <main>
   <div class="tiles" id="tiles"></div>
@@ -55,6 +58,9 @@
     <h2>Equity (USDC, settled trades, open positions at cost)</h2>
     <div id="chart"><svg id="svg" role="img" aria-label="Equity curve"></svg><div id="tip"></div></div>
   </section>
+  <section><h2>Agents (all trade from the same money; P&amp;L is attributed per agent)</h2><div id="agents"></div></section>
+  <section><h2>Learning agents</h2><div id="rl"></div></section>
+  <section><h2>Models vs market (P(Up) at the same moments, settled on the outcome; lower is better)</h2><div id="scores"></div></section>
   <div class="grid2">
     <section><h2>Calibration: all periodic predictions (P(Up) vs outcome)</h2><div id="calAll"></div></section>
     <section><h2>Calibration: traded (P(win) at decision vs outcome)</h2><div id="calTr"></div></section>
@@ -121,7 +127,8 @@ async function refresh() {
     $("label").textContent = r.label || "";
     const b = r.bootstrap || {};
     $("tiles").innerHTML = [
-      tile("Equity", num(r.bankroll.equity)), tile("Settled P&L after fees", num(r.pnl.settled_after_fees, 4)),
+      tile("Equity", num(r.bankroll.equity)), tile("Topped up", num(r.bankroll.deposits)),
+      tile("Settled P&L after fees", num(r.pnl.settled_after_fees, 4)),
       tile("%/day (compounded, wall clock)", pct(r.pnl.pct_per_day_compounded_wallclock)),
       tile("Daily return 95% CI", b.ci95 ? pct(b.ci95[0]) + " … " + pct(b.ci95[1]) : "–"),
       tile("Trades settled / open", r.trades.settled + " / " + r.trades.open),
@@ -133,6 +140,21 @@ async function refresh() {
       tile("Fees paid", num(r.pnl.fees_paid, 4)), tile("Elapsed days", num(r.elapsed_days, 3)),
     ].join("");
     drawEquity(r.equity_curve);
+    $("agents").innerHTML = table(r.agents, [["agent", x => x.agent], ["signals", x => x.signals],
+      ["filled", x => x.filled], ["settled / open", x => x.settled + " / " + x.open],
+      ["win rate vs predicted", x => pct(x.win_rate, 1) + " vs " + pct(x.predicted_win_rate, 1)],
+      ["P&L", x => num(x.pnl, 4)], ["staked", x => num(x.staked)], ["return on staked", x => pct(x.return_on_staked, 2)],
+      ["fees", x => num(x.fees, 4)]]);
+    $("scores").innerHTML = table((r.model_scores || {}).rows, [["model", x => x.model], ["n", x => x.n],
+      ["Brier", x => num(x.brier, 4)], ["log loss", x => num(x.log_loss, 4)]]);
+    const live = (s.engine || {}).rl || {}, saved = r.rl || {};
+    const rlNames = [...new Set([...Object.keys(live), ...Object.keys(saved)])].sort();
+    $("rl").innerHTML = table(rlNames.map(k => ({k, ...(saved[k] || {}), ...(live[k] || {})})), [
+      ["agent", x => x.k], ["windows learned", x => x.windows_learned],
+      ["status", x => x.trading === undefined ? "–" : (x.trading ? "trading" : "learning (" + x.windows_learned + "/" + x.warmup_windows + ")")],
+      ["extra edge required", x => num(x.penalty, 4)],
+      ["largest weights", x => Object.entries(x.weights || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 4)
+        .map(([n, w]) => n + " " + Number(w).toFixed(2)).join(", ")]]);
     const calCols = [["bin", x => x.bin], ["n", x => x.n], ["mean pred", x => num(x.mean_pred, 3)], ["actual", x => num(x.actual, 3)], ["± se", x => num(x.se, 3)]];
     $("calAll").innerHTML = table(r.calibration.all_predictions.table, calCols);
     $("calTr").innerHTML = table(r.calibration.traded.table, calCols);
@@ -142,38 +164,60 @@ async function refresh() {
       `<p class="muted">σ/√s ${num(e.sigma_per_sqrt_s, 6)} · RTT median ${num(e.rtt_median_ms, 0)} ms (${e.rtt_samples} samples) · markets ${(e.markets||[]).map(m => m.slug.slice(-10) + (m.strike ? " K=" + m.strike.toFixed(2) : "")).join(", ")}</p>` +
       `<p class="muted">counters ${esc(JSON.stringify(e.counters || {}))}</p>`;
     $("perday").innerHTML = table(Object.entries(r.per_day || {}).map(([d, v]) => ({d, ...v})), [["day", x => x.d], ["trades", x => x.trades], ["P&L", x => num(x.pnl, 4)], ["fees", x => num(x.fees, 4)]]);
-    $("signals").innerHTML = table(sig, [["time", x => new Date(x.ts_ms).toISOString().slice(11, 19)], ["market", x => x.slug.slice(-10)], ["side", x => x.side], ["kind", x => x.kind], ["p_win", x => num(x.p_win, 3)], ["ask", x => num(x.best_ask, 2)], ["limit", x => num(x.limit_price, 2)], ["edge", x => num(x.edge, 3)], ["latency", x => num(x.latency_ms, 0)], ["status", x => x.status], ["net shares", x => num(x.net_shares, 2)], ["cost", x => num(x.cost, 2)], ["P&L", x => x.pnl == null ? "open" : num(x.pnl, 3)]]);
+    $("signals").innerHTML = table(sig, [["time", x => new Date(x.ts_ms).toISOString().slice(11, 19)], ["agent", x => x.agent], ["market", x => x.slug.slice(-10)], ["side", x => x.side], ["kind", x => x.kind], ["p_win", x => num(x.p_win, 3)], ["ask", x => num(x.best_ask, 2)], ["limit", x => num(x.limit_price, 2)], ["edge", x => num(x.edge, 3)], ["latency", x => num(x.latency_ms, 0)], ["status", x => x.status], ["net shares", x => num(x.net_shares, 2)], ["cost", x => num(x.cost, 2)], ["P&L", x => x.pnl == null ? "open" : num(x.pnl, 3)]]);
     $("logs").textContent = logs.split("\n").reverse().join("\n");
   } catch (err) { $("health").innerHTML = `<span class="bad">dashboard fetch failed: ${esc(err)}</span>`; }
 }
-async function resetDb() {
-  if (!confirm("Reset the paper account?\n\nAll signals, fills, settlements and predictions are deleted and the " +
-               "bankroll goes back to its starting value. Recordings are kept. This cannot be undone.")) return;
-  const btn = $("reset");
+let adminToken = "";
+// POST JSON to an endpoint that changes the account; asks for the admin token if the server wants one.
+// Resolves to the response body, or to null if the user cancelled the token prompt.
+async function postAdmin(url, body) {
+  let retry = false;
+  for (;;) {
+    const headers = {"Content-Type": "application/json"};
+    if (adminToken) headers["X-Admin-Token"] = adminToken;
+    const res = await fetch(url, {method: "POST", headers, body: JSON.stringify(body)});
+    const out = await res.json().catch(() => ({}));
+    if (res.status === 401 && out.token_required) {
+      adminToken = prompt(retry || adminToken ? "Wrong admin token. Try again:" : "Admin token (POLYBOT_ADMIN_TOKEN):") || "";
+      if (!adminToken) return null;
+      retry = true;
+      continue;
+    }
+    if (!res.ok || !out.ok) throw new Error(out.error || ("HTTP " + res.status));
+    return out;
+  }
+}
+async function withButton(id, what, fn) {
+  const btn = $(id);
   btn.disabled = true;
   try {
-    let token = "";
-    for (;;) {
-      const headers = {"Content-Type": "application/json"};
-      if (token) headers["X-Admin-Token"] = token;
-      const res = await fetch("/api/reset", {method: "POST", headers, body: JSON.stringify({confirm: "RESET"})});
-      const out = await res.json().catch(() => ({}));
-      if (res.status === 401 && out.token_required) {
-        token = prompt(token ? "Wrong admin token. Try again:" : "Admin token (POLYBOT_ADMIN_TOKEN):");
-        if (!token) return;
-        continue;
-      }
-      if (!res.ok || !out.ok) throw new Error(out.error || ("HTTP " + res.status));
-      break;
-    }
-    await refresh();
+    if (await fn() !== null) await refresh();
   } catch (err) {
-    alert("Reset failed: " + err.message);
+    alert(what + " failed: " + err.message);
   } finally {
     btn.disabled = false;
   }
 }
+async function resetDb() {
+  if (!confirm("Reset the paper account?\n\nAll signals, fills, settlements, predictions and top-ups are deleted and " +
+               "the bankroll goes back to its starting value. What the learning agents have learned is kept, and so " +
+               "are the recordings. This cannot be undone.")) return;
+  await withButton("reset", "Reset", () => postAdmin("/api/reset", {confirm: "RESET"}));
+}
+async function topUp() {
+  const v = prompt("Top up the paper bankroll by how many USDC?\n\nAll agents trade from this one account. A top-up " +
+                   "adds to cash and equity but is not counted as profit or return.", "1000");
+  if (v === null) return;
+  const amount = Number(v.trim());
+  if (!v.trim() || !Number.isFinite(amount) || amount <= 0 || amount > 1e7) {
+    alert("Enter an amount above 0 and at most 10,000,000.");
+    return;
+  }
+  await withButton("topup", "Top up", () => postAdmin("/api/topup", {amount}));
+}
 $("reset").onclick = resetDb;
+$("topup").onclick = topUp;
 refresh(); setInterval(refresh, 5000);
 </script>
 </body>
