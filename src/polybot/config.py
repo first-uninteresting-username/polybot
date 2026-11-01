@@ -70,6 +70,21 @@ class Settings:
     max_model_market_gap: float = 0.20  # skip if |P(win) - token mid| is larger (likely model/data error); 0 = off
     kelly_fraction: float = 0.25  # stake = min(stake_fraction, kelly_fraction * Kelly f*) x equity; 0 = flat
 
+    # --- agents: every listed agent trades from the same paper account (one cash pool, one top-up) ---
+    # "gbm_twap" is the original strategy above (the configured ``model`` traded on its sd band).
+    # "rl_wide" (about 25 inputs) and "rl_core" (5 inputs) are online-learning agents, see rl.py.
+    agents: str = "gbm_twap,rl_wide,rl_core"
+
+    # --- online-learning (RL) agents ---
+    rl_min_edge: float = 0.03  # required (pessimistic P(win) - all-in cost per share), as min_edge
+    rl_pessimism: float = 1.0  # decide on the posterior-mean logit minus this many posterior sd (each side)
+    rl_prior_sd: float = 0.25  # prior sd of every weight; inputs are scaled to about unit size
+    rl_memory_windows: int = 2016  # forgetting horizon in resolved windows (about 7 days); 0 = never forget
+    rl_min_windows: int = 100  # resolved windows to learn from before an agent may trade (about 8 hours)
+    rl_decision_interval_ms: int = 1000  # how often each RL agent looks at each live window
+    rl_sample_interval_ms: int = 5000  # one training sample per window per this interval
+    rl_bias_prior_trades: float = 30.0  # shrinkage of the learned selection-bias penalty, in pseudo-trades
+
     # --- fill model ---
     latency_ms_floor: float = 150.0  # min simulated decision->match latency
     latency_extra_ms: float = 50.0  # added to every sampled RTT (processing / signing time)

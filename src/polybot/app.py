@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import signal
 import time
+import uuid
 from typing import Any
 
 import aiohttp
@@ -14,6 +16,7 @@ from aiohttp import web
 
 from .config import Settings
 from .engine import Engine
+from .events import SRC_DEPOSIT
 from .feeds.ws import ClobMarketFeed, Queue, WsFeed, binance_feed, coinbase_feed, now_ms, rtds_feed
 from .recorder import Recorder
 from .reporting import build_report
@@ -144,6 +147,18 @@ class LiveApp:
         log.warning("paper account reset from the dashboard; bankroll back to %.2f", self.s.starting_bankroll)
         return dict(ok=True, reset_ms=ts, bankroll=self.s.starting_bankroll)
 
+    def topup(self, amount: float) -> dict[str, Any]:
+        """Add paper money to the bankroll every agent shares (dashboard button). The deposit is an input event
+        like any other: it goes through the pipeline, so it is recorded and a replay applies it at the same
+        point. Runs on the event loop between two engine messages, so it cannot interleave with them."""
+        dep_id = uuid.uuid4().hex
+        self.pipeline.process(SRC_DEPOSIT, now_ms(), json.dumps({"id": dep_id, "amount": amount}, separators=(",", ":")))
+        ok = bool(self.store.query("SELECT 1 FROM deposits WHERE id=?", (dep_id,)))
+        if ok:
+            log.warning("paper bankroll topped up by %.2f USDC from the dashboard", amount)
+        return dict(ok=ok, amount=amount, deposits_total=round(self.store.deposits_total(), 4),
+                    cash=round(self.store.cash(self.s.starting_bankroll), 4), equity=round(self.engine.equity(), 4))
+
     def signals(self, limit: int) -> list[dict[str, Any]]:
         rows = self.store.query(
             "SELECT s.*, f.net_shares, f.cost, f.fee, st.pnl, st.settled_by FROM signals s "
@@ -154,7 +169,7 @@ class LiveApp:
     async def run(self) -> None:
         log.info("polybot starting (PAPER TRADING ONLY - no orders are ever sent)")
         runner = web.AppRunner(make_app(self.health, self.report, self.state, self.signals,
-                                           self.reset, self.s.admin_token))
+                                           self.reset, self.s.admin_token, topup=self.topup))
         await runner.setup()
         await web.TCPSite(runner, self.s.http_host, self.s.http_port).start()
         log.info("http listening on %s:%s", self.s.http_host, self.s.http_port)

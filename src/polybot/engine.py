@@ -9,6 +9,10 @@ Order of operations for every incoming event at time ``t``:
     (i.e. the book as it was at the arrival moment);
  2. the event is applied to the state;
  3. if ``eval_interval_ms`` of event time has passed, strategy evaluation and settlement checks run.
+
+Several agents (``Settings.agents``) can trade: the original strategy (named after its model, ``gbm_twap``)
+and the online-learning agents of ``rl.py``. They all trade from one paper account: one cash pool sizes every
+stake, and an order of one agent sees the displayed depth minus what our own simulated orders already took.
 """
 
 from __future__ import annotations
@@ -23,11 +27,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import rl
 from .book import OrderBook
 from .config import Settings
 from .events import (
     BookDelta,
     BookSnapshot,
+    Deposit,
     Event,
     LatencySample,
     MarketInfo,
@@ -47,11 +53,30 @@ log = logging.getLogger("polybot.engine")
 
 VENUES = ("binance", "coinbase")
 HISTORY_S = 3600
+RL_KEEP_S = 6 * 3600  # unresolved RL experience is dropped this long after its window ended
+MOMENTUM_S = (5, 15, 30, 60, 120)
 
 
 def _seed_for(*parts: Any) -> int:
     h = hashlib.sha256("|".join(str(p) for p in parts).encode()).digest()
     return int.from_bytes(h[:8], "big")
+
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return min(max(x, lo), hi)
+
+
+def _book_shape(book: OrderBook, tick: float) -> tuple[float, float]:
+    """(size imbalance at the touch in [-1, 1], log(bid depth / ask depth) within 3 ticks of the touch)."""
+    bb, ba = book.best_bid(), book.best_ask()
+    imb = 0.0
+    if bb is not None and ba is not None:
+        sb, sa = book.bids[bb], book.asks[ba]
+        imb = (sb - sa) / (sb + sa)
+    reach = 3 * tick + 1e-9
+    db = sum(sz for p, sz in book.bids.items() if p >= bb - reach) if bb is not None else 0.0
+    da = sum(sz for p, sz in book.asks.items() if p <= ba + reach) if ba is not None else 0.0
+    return imb, _clamp(math.log((db + 1.0) / (da + 1.0)), -3.0, 3.0)
 
 
 @dataclass
@@ -75,6 +100,7 @@ class PendingOrder:
     limit_price: float
     budget: float
     p_win: float
+    agent: str
 
 
 @dataclass
@@ -82,6 +108,8 @@ class MarketState:
     info: MarketInfo
     strike: float | None = None
     last_pred_ms: int = 0
+    last_rl_ms: int = 0  # last RL decision bucket
+    last_rl_sample_ms: int = 0  # last RL training-sample bucket
 
 
 class Engine:
@@ -101,6 +129,7 @@ class Engine:
         self.twap_recv_ms = 0
         self.comp_log: deque[tuple[int, float]] = deque()  # (second, log composite) for realized vol
         self.last_comp_sec = 0
+        self._comp_sigma_cache: tuple[Any, float | None] = (None, None)
         self.markets: dict[str, MarketState] = {}
         self.token_map: dict[str, tuple[str, str]] = {}  # token -> (slug, "Up"/"Down")
         self.books: dict[str, OrderBook] = {}
@@ -112,7 +141,31 @@ class Engine:
         self.next_eval_ms = 0
         self.last_prune_ms = 0
         self.last_decision: dict[str, Any] = {}
+        # Shares our own simulated takers (all agents) took per token and price level in the live markets.
+        # The exchange never saw these paper fills, so its book still shows that size.
+        self.own_taken: dict[str, dict[float, float]] = {}
+        self.last_trade: dict[str, tuple[float, int]] = {}  # token -> (last trade price, recv_ms)
+        self._init_agents()
         self._recover()
+
+    def _init_agents(self) -> None:
+        names = [a.strip() for a in self.s.agents.split(",") if a.strip()]
+        self.baseline_name = self.model.name  # the original strategy is named after its model
+        unknown = [a for a in names if a != self.baseline_name and a not in rl.PRESETS]
+        if unknown or len(set(names)) != len(names):
+            raise ValueError(f"bad agents {self.s.agents!r}; available: {[self.baseline_name, *rl.PRESETS]}")
+        self.agent_names = names
+        self.baseline_on = self.baseline_name in names
+        self.rl_agents = [rl.make_agent(a, self.s.rl_prior_sd, self.s.rl_memory_windows)
+                          for a in names if a in rl.PRESETS]
+        self.rl_by_name = {a.name: a for a in self.rl_agents}
+        for ag in self.rl_agents:
+            raw = self.store.get_rl_state(ag.name)
+            if raw is not None and not ag.load_json(raw):
+                log.warning("starting %s from its prior: the saved state is unreadable or used other inputs", ag.name)
+        # slug -> (window end, feature vectors sampled in that window), until the official outcome arrives
+        self.rl_experience: dict[str, tuple[int, list[list[float]]]] = {}
+        self.rl_done: dict[str, int] = {}  # slug -> window end, for windows already learned from
 
     # ------------------------------------------------------------------ recovery
     def _recover(self) -> None:
@@ -127,12 +180,14 @@ class Engine:
             self.open_slugs.add(r[0])
 
     def reset_trading(self) -> None:
-        """Forget in-memory orders and positions after ``Storage.reset_trading`` (market state stays)."""
+        """Forget in-memory orders and positions after ``Storage.reset_trading``. Market state stays, and so
+        does what the learning agents have learned (it is about markets, not about the account)."""
         self.pending.clear()
         self.resting.clear()
         self.open_slugs.clear()
         self.counters.clear()
         self.last_decision = {}
+        self.own_taken.clear()
 
     def _inc(self, k: str, n: int = 1) -> None:
         self.counters[k] = self.counters.get(k, 0) + n
@@ -185,6 +240,8 @@ class Engine:
                 b.apply_delta(ev)
         elif isinstance(ev, TradePrint):
             self.clob_recv_ms = ev.recv_ms
+            if ev.asset_id in self.token_map:
+                self.last_trade[ev.asset_id] = (ev.price, ev.recv_ms)
             self._maker_on_trade(ev)
         elif isinstance(ev, TickSizeChange):
             b = self.books.get(ev.asset_id)
@@ -196,6 +253,10 @@ class Engine:
             self._on_resolution(ev)
         elif isinstance(ev, LatencySample):
             self.rtts.append(ev.rtt_ms)
+        elif isinstance(ev, Deposit):
+            if self.store.insert_deposit(ev.deposit_id, ev.recv_ms, ev.amount):
+                self._inc("deposits")
+                log.info("paper bankroll topped up by %.2f USDC (shared by all agents)", ev.amount)
         self._prune()
 
     # ------------------------------------------------------------------ price state
@@ -230,17 +291,60 @@ class Engine:
         """Per-sqrt-second vol of the composite log price over the lookback, floored and inflated."""
         if len(self.comp_log) < self.s.min_vol_samples:
             return None
+        sigma = self._comp_sigma()
+        if sigma is None:
+            return None
+        return max(sigma, self.s.vol_floor_per_sqrt_s) * self.s.vol_inflation
+
+    def _comp_sigma(self) -> float | None:
+        """Raw vol over the whole composite lookback, cached until ``comp_log`` changes. The deque only grows
+        at the right and shrinks at the left, so its length and end points identify its content."""
+        cl = self.comp_log
+        key = (len(cl), cl[0], cl[-1]) if cl else None
+        cached_key, cached = self._comp_sigma_cache
+        if key is not None and key == cached_key:
+            return cached
+        sigma = self._sigma_of(cl)
+        self._comp_sigma_cache = (key, sigma)
+        return sigma
+
+    @staticmethod
+    def _sigma_of(samples: Any) -> float | None:
+        """Raw per-sqrt-second vol of ``(second, log price)`` samples."""
         ss, dt = 0.0, 0
         prev = None
-        for sec, lp in self.comp_log:
+        for sec, lp in samples:
             if prev is not None:
                 ss += (lp - prev[1]) ** 2
                 dt += sec - prev[0]
             prev = (sec, lp)
         if dt <= 0:
             return None
-        sigma = math.sqrt(ss / dt)
-        return max(sigma, self.s.vol_floor_per_sqrt_s) * self.s.vol_inflation
+        return math.sqrt(ss / dt)
+
+    def _recent_comp(self, seconds: int) -> list[tuple[int, float]]:
+        cutoff = self.now_ms // 1000 - seconds
+        out: list[tuple[int, float]] = []
+        for x in reversed(self.comp_log):
+            if x[0] < cutoff:
+                break
+            out.append(x)
+        out.reverse()
+        return out
+
+    def _comp_before(self, horizons: tuple[int, ...]) -> dict[int, tuple[int, float]]:
+        """For each horizon h: the latest composite sample at least h seconds old."""
+        now_sec = self.now_ms // 1000
+        want = sorted(horizons)
+        out: dict[int, tuple[int, float]] = {}
+        i = 0
+        for sec, lp in reversed(self.comp_log):
+            while i < len(want) and sec <= now_sec - want[i]:
+                out[want[i]] = (sec, lp)
+                i += 1
+            if i == len(want):
+                break
+        return out
 
     def spot_estimate(self) -> tuple[float, float] | None:
         """(log Chainlink-spot estimate, basis error sd) from fresh exchange prices, or None."""
@@ -302,6 +406,16 @@ class Engine:
             for t in (m.token_up, m.token_down):
                 self.token_map.pop(t, None)
                 self.books.pop(t, None)
+                self.own_taken.pop(t, None)
+                self.last_trade.pop(t, None)
+        old = now_s - RL_KEEP_S
+        for slug in [s for s, (end, _) in self.rl_experience.items() if end < old]:
+            del self.rl_experience[slug]
+        for slug in [s for s, end in self.rl_done.items() if end < old]:
+            del self.rl_done[slug]
+        for ag in self.rl_agents:
+            for slug in [s for s, v in ag.virtual.items() if v[2] < old]:
+                del ag.virtual[slug]
 
     # ------------------------------------------------------------------ model input
     def model_input(self, ms: MarketState) -> ModelInput | None:
@@ -333,11 +447,12 @@ class Engine:
         return self.model.predict(inp) if inp else None
 
     def predict_band(self, ms: MarketState) -> tuple[Prediction, float, float] | None:
+        inp = self.model_input(ms)
+        return self._band(inp) if inp is not None else None
+
+    def _band(self, inp: ModelInput) -> tuple[Prediction, float, float]:
         """Central prediction plus the lowest and highest P(Up) with sigma and basis sd scaled by
         1/model_sd_band .. model_sd_band. P(Up) is monotone in the spread, so the endpoints bound it."""
-        inp = self.model_input(ms)
-        if inp is None:
-            return None
         pred = self.model.predict(inp)
         ps = [pred.p_up]
         k = self.s.model_sd_band
@@ -400,21 +515,25 @@ class Engine:
             m = ms.info
             if not (m.start_ts <= now_s < m.end_ts):
                 continue
-            band = self.predict_band(ms)
+            inp = self.model_input(ms)
+            band = self._band(inp) if inp is not None else None
             bucket = self.now_ms - self.now_ms % self.s.prediction_interval_ms
             if band is not None and bucket > ms.last_pred_ms:
                 ms.last_pred_ms = bucket
                 self.store.insert_prediction(m.slug, bucket, m.end_ts - now_s, band[0].p_up)
-            self._consider_entry(ms, band)
+            if self.baseline_on:
+                self._consider_entry(ms, band)
+            if self.rl_agents:
+                self._rl_step(ms, inp, band)
 
     def _consider_entry(self, ms: MarketState, band: tuple[Prediction, float, float] | None) -> None:
         m = ms.info
         tau = m.end_ts - self.now_ms / 1000.0
         if band is None or not (self.s.min_tau_s <= tau <= self.s.max_tau_s) or not m.accepting_orders:
             return
-        if self.store.entries_for(m.slug) >= self.s.max_entries_per_market:
+        if self.store.entries_for(m.slug, self.baseline_name) >= self.s.max_entries_per_market:
             return
-        if any(p.slug == m.slug for p in self.pending):
+        if any(p.slug == m.slug and p.agent == self.baseline_name for p in self.pending):
             return
         if len(self.rtts) < 5:
             self._inc("skip_no_latency_samples")
@@ -451,17 +570,18 @@ class Engine:
             return
         edge, side, token, p_win, p_safe, ask, limit = best
         budget = self.stake_budget(p_safe, all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent))
-        pre = simulate_taker_buy(self.books[token].asks_ascending(), limit, budget, m.min_size, m.fee_rate,
+        pre = simulate_taker_buy(self._asks_for(token), limit, budget, m.min_size, m.fee_rate,
                                  m.fee_exponent, self.s.book_take_fraction, self.s.fee_round_up)
         if not pre.levels:
             self._inc("skip_" + pre.reason)
             return
-        self._submit(ms, side, token, "taker", p_win, ask, limit, edge, tau, budget)
+        self._submit(ms, side, token, "taker", p_win, ask, limit, edge, tau, budget, self.baseline_name)
 
     def _clip(self, p: float) -> float:
         return min(max(p, 1.0 - self.s.p_clip), self.s.p_clip)
 
-    def _market_disagrees(self, p_win: float, bid: float | None, ask: float) -> bool:
+    def _market_disagrees(self, p_win: float, bid: float | None, ask: float,
+                          counter: str = "skip_model_market_gap") -> bool:
         """A liquid market far from the model is far more often a model or data error (wrong strike,
         stale oracle, vol regime change) than free money."""
         gap = self.s.max_model_market_gap
@@ -469,9 +589,27 @@ class Engine:
             return False
         mid = (bid + ask) / 2 if bid is not None else ask
         if abs(p_win - mid) > gap:
-            self._inc("skip_model_market_gap")
+            self._inc(counter)
             return True
         return False
+
+    def _asks_for(self, token: str) -> list[tuple[float, float]]:
+        """Displayed asks minus what our own simulated takers (any agent) already took at each level in this
+        market. Our paper fills never reach the exchange, so its book still shows that size; without this,
+        two agents (or two entries) would both take ``book_take_fraction`` of the same displayed shares."""
+        book = self.books.get(token)
+        if book is None:
+            return []
+        asks = book.asks_ascending()
+        taken = self.own_taken.get(token)
+        if not taken:
+            return asks
+        out = []
+        for price, size in asks:
+            left = size - taken.get(price, 0.0)
+            if left > 1e-9:
+                out.append((price, left))
+        return out
 
     def _maybe_maker(self, ms: MarketState, band: tuple[Prediction, float, float]) -> None:
         if not self.s.enable_maker:
@@ -493,8 +631,195 @@ class Engine:
             budget = self.stake_budget(p_safe, price)
             if floor_size(budget / price) < m.min_size:
                 continue
-            self._submit(ms, side, token, "maker", p_win, ask, price, p_safe - price, tau, budget)
+            self._submit(ms, side, token, "maker", p_win, ask, price, p_safe - price, tau, budget, self.baseline_name)
             return
+
+    # ------------------------------------------------------------------ learning agents (rl.py)
+    def rl_features(self, ms: MarketState, inp: ModelInput, pred: Prediction) -> tuple[list[float], float] | None:
+        """The learning agents' inputs (``rl.FEATURES`` order) and the market's P(Up), computed only from
+        data already received (no look-ahead). None if an input is unavailable."""
+        m = ms.info
+        up, dn = self.books.get(m.token_up), self.books.get(m.token_down)
+        sig = inp.sigma
+        if up is None or dn is None or not sig > 0 or not inp.basis_sd > 0:
+            return None
+        bu, au, bd, ad = up.best_bid(), up.best_ask(), dn.best_bid(), dn.best_ask()
+        mids, spreads = [], []
+        if bu is not None and au is not None:
+            mids.append((bu + au) / 2)
+            spreads.append(au - bu)
+        if bd is not None and ad is not None:
+            mids.append(1.0 - (bd + ad) / 2)
+            spreads.append(ad - bd)
+        if not mids:
+            return None
+        p_mkt = sum(mids) / len(mids)
+        mkt = rl.logit(p_mkt, 0.01)
+        spread = _clamp(10.0 * sum(spreads) / len(spreads), 0.0, 2.0)
+        imb_u, dep_u = _book_shape(up, up.tick or m.tick_size)
+        imb_d, dep_d = _book_shape(dn, dn.tick or m.tick_size)
+        trade: tuple[float, int] | None = None  # latest trade of either token, as P(Up)
+        for tok, flip in ((m.token_up, False), (m.token_down, True)):
+            tr = self.last_trade.get(tok)
+            if tr is not None and self.now_ms - tr[1] <= 60_000 and (trade is None or tr[1] > trade[1]):
+                trade = ((1.0 - tr[0]) if flip else tr[0], tr[1])
+        s_all = self._comp_sigma()
+        recent = self._recent_comp(60)
+        s_60 = self._sigma_of(recent) if len(recent) >= 30 else None
+        prices = [v.price for v in self.venues.values()]
+        if s_all is None or min(prices) <= 0:
+            return None
+        lp_now = sum(math.log(p) for p in prices) / len(prices)  # the composite, as in comp_log
+        now_s = self.now_ms / 1000.0
+        past = self._comp_before(MOMENTUM_S)
+        mom: dict[str, float] = {}
+        for h in MOMENTUM_S:
+            pt = past.get(h)
+            mom[f"mom_{h}"] = 0.0 if pt is None else _clamp(
+                (lp_now - pt[1]) / (sig * math.sqrt(max(now_s - pt[0], 1.0))), -4.0, 4.0)
+        ests = [math.log(v.price) + v.basis for v in self.venues.values() if v.basis is not None]
+        if len(ests) != 2:
+            return None
+        lag_s = max(self.now_ms - self.cl_spot_last_ms, 0) / 1000.0
+        cl_last = self.cl_spot.get(self.cl_spot_last_ms // 1000)
+        gbm = _clamp(rl.logit(pred.p_up, 1e-6), -7.0, 7.0)
+        tau = _clamp(inp.tau_s / self.s.window_seconds, 0.0, 1.0)
+        f = {
+            "bias": 1.0,
+            "gbm_logit": gbm,
+            "gbm_z": _clamp((pred.mean - inp.log_strike) / pred.sd, -8.0, 8.0),
+            "mkt_logit": mkt,
+            "tau": tau,
+            "known_w": inp.known_weight,
+            "gbm_x_tau": gbm * tau,
+            "mkt_x_tau": mkt * tau,
+            "mkt_x_spread": mkt * spread,
+            "spread": spread,
+            "overround": _clamp(10.0 * (au + ad - 1.0), -1.0, 2.0) if au is not None and ad is not None else 0.0,
+            "book_imb": (imb_u - imb_d) / 2,
+            "depth_imb": (dep_u - dep_d) / 2,
+            "trade_dev": _clamp(rl.logit(trade[0], 0.01) - mkt, -2.0, 2.0) if trade is not None else 0.0,
+            "vol_level": _clamp(math.log(max(s_all, 1e-7) / 5e-5), -3.0, 3.0),
+            "vol_ratio": _clamp(math.log(max(s_60, 1e-7) / max(s_all, 1e-7)), -2.0, 2.0) if s_60 is not None else 0.0,
+            **mom,
+            "venue_gap": _clamp((ests[0] - ests[1]) / inp.basis_sd, -4.0, 4.0),
+            "basis_sd": _clamp(math.log(inp.basis_sd / 1e-4), -3.0, 3.0),
+            "cl_lag": _clamp(lag_s / 5.0, 0.0, 3.0),
+            "cl_gap": (_clamp((inp.log_spot_est - math.log(cl_last)) / (sig * math.sqrt(max(lag_s, 1.0))), -4.0, 4.0)
+                       if cl_last is not None and cl_last > 0 else 0.0),
+        }
+        x = [f[n] for n in rl.FEATURES]
+        if not all(math.isfinite(v) for v in x):
+            return None
+        return x, p_mkt
+
+    def _rl_step(self, ms: MarketState, inp: ModelInput | None, band: tuple[Prediction, float, float] | None) -> None:
+        """Once per ``rl_decision_interval_ms`` and live window: compute the inputs, keep a training sample
+        every ``rl_sample_interval_ms``, and let every learning agent decide."""
+        m = ms.info
+        now = self.now_ms
+        bucket = now - now % self.s.rl_decision_interval_ms
+        if inp is None or band is None or bucket <= ms.last_rl_ms:
+            return
+        ms.last_rl_ms = bucket
+        tau = m.end_ts - now / 1000.0
+        if not (self.s.min_tau_s <= tau <= self.s.max_tau_s) or not m.accepting_orders or m.slug in self.rl_done:
+            return
+        if self.fresh(m) is not None:
+            return  # same data requirements as trading, so training samples look like decisions
+        pred = band[0]
+        feats = self.rl_features(ms, inp, pred)
+        if feats is None:
+            self._inc("rl_skip_inputs")
+            return
+        x_all, p_mkt = feats
+        sbucket = now - now % self.s.rl_sample_interval_ms
+        sample = sbucket > ms.last_rl_sample_ms
+        if sample:
+            ms.last_rl_sample_ms = sbucket
+            self.rl_experience.setdefault(m.slug, (m.end_ts, []))[1].append(x_all)
+            # the yardsticks, sampled at the same moments as the agents
+            self.store.insert_agent_prediction("market", m.slug, sbucket, tau, p_mkt)
+            self.store.insert_agent_prediction(self.baseline_name, m.slug, sbucket, tau, pred.p_up)
+        k = self.s.rl_pessimism
+        for ag in self.rl_agents:
+            mu, var = ag.learner.predict(ag.project(x_all))
+            p_up = rl.predictive(mu, var)
+            if sample:
+                self.store.insert_agent_prediction(ag.name, m.slug, sbucket, tau, p_up)
+            sd = math.sqrt(var)
+            self._rl_decide(ms, ag, p_up, rl.sigmoid(mu - k * sd), rl.sigmoid(mu + k * sd), tau)
+
+    def _rl_decide(self, ms: MarketState, ag: rl.RLAgent, p_up: float, lo: float, hi: float, tau: float) -> None:
+        """The agent's policy: buy the side whose pessimistic P(win) beats the all-in cost by the required
+        edge, through the same filters, sizing and fill simulation as the original strategy."""
+        m = ms.info
+        best: tuple[float, str, str, float, float, float, float] | None = None
+        for side, token, p, p_worst in (("Up", m.token_up, p_up, lo), ("Down", m.token_down, 1.0 - p_up, 1.0 - hi)):
+            p_win, p_safe = self._clip(p), self._clip(p_worst)
+            book = self.books[token]
+            ask = book.best_ask()
+            if ask is None:
+                continue
+            edge = p_safe - all_in_cost_per_share(ask, m.fee_rate, m.fee_exponent)
+            if edge < self.s.rl_min_edge:
+                continue
+            if self._market_disagrees(p_win, book.best_bid(), ask, f"{ag.name}:skip_model_market_gap"):
+                continue
+            if best is None or edge > best[0]:
+                best = (edge, side, token, p_win, p_safe, ask, book.tick or m.tick_size)
+        if best is None:
+            return
+        edge, side, token, p_win, p_safe, ask, tick = best
+        ag.note_virtual(m.slug, side, p_win, m.end_ts)  # the policy's choice in this window, traded or not
+        if ag.learner.windows < self.s.rl_min_windows:
+            self._inc(f"{ag.name}:skip_warmup")
+            return
+        penalty = ag.penalty(self.s.rl_bias_prior_trades)
+        need = self.s.rl_min_edge + penalty
+        if edge < need:
+            self._inc(f"{ag.name}:skip_penalty")
+            return
+        if self.store.entries_for(m.slug, ag.name) >= self.s.max_entries_per_market:
+            return
+        if any(po.slug == m.slug and po.agent == ag.name for po in self.pending):
+            return
+        if len(self.rtts) < 5:
+            self._inc(f"{ag.name}:skip_no_latency_samples")
+            return
+        limit = floor_to_tick(ask + self.s.limit_slippage_ticks * tick, tick)
+        while limit > ask + 1e-9 and p_safe - all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent) < need:
+            limit = round(limit - tick, 6)
+        limit = min(limit, 0.99)
+        budget = self.stake_budget(p_safe - penalty, all_in_cost_per_share(limit, m.fee_rate, m.fee_exponent))
+        pre = simulate_taker_buy(self._asks_for(token), limit, budget, m.min_size, m.fee_rate, m.fee_exponent,
+                                 self.s.book_take_fraction, self.s.fee_round_up)
+        if not pre.levels:
+            self._inc(f"{ag.name}:skip_{pre.reason}")
+            return
+        self._submit(ms, side, token, "taker", p_win, ask, limit, edge, tau, budget, ag.name)
+
+    def _rl_learn(self, slug: str, winner: str) -> None:
+        """The official outcome is the reward signal: every agent learns from all samples of the window and
+        scores the trade its policy chose there (if any). Then the learned state is saved."""
+        if not self.rl_agents or winner not in ("Up", "Down") or slug in self.rl_done:
+            return
+        exp = self.rl_experience.pop(slug, None)
+        ms = self.markets.get(slug)
+        self.rl_done[slug] = exp[0] if exp is not None else (ms.info.end_ts if ms else self.now_ms // 1000)
+        y = 1 if winner == "Up" else 0
+        for ag in self.rl_agents:
+            learned = False
+            if exp is not None and exp[1]:
+                learned = ag.learner.update([ag.project(x) for x in exp[1]], y)
+                if learned:
+                    self._inc(f"{ag.name}:windows_learned")
+                else:
+                    self._inc(f"{ag.name}:update_rejected")
+                    log.warning("%s: update for %s rejected as numerically unsound; kept the old state", ag.name, slug)
+            scored = ag.learn_outcome(slug, winner, self.s.rl_memory_windows)
+            if learned or scored:
+                self.store.set_rl_state(ag.name, ag.to_json(), self.now_ms)
 
     def sample_latency_ms(self, sid: str) -> float:
         rng = random.Random(_seed_for(self.s.seed, sid))
@@ -503,22 +828,26 @@ class Engine:
         return max(self.s.latency_ms_floor, base * jitter + self.s.latency_extra_ms)
 
     def _submit(self, ms: MarketState, side: str, token: str, kind: str, p_win: float, ask: float,
-                limit: float, edge: float, tau: float, budget: float) -> None:
+                limit: float, edge: float, tau: float, budget: float, agent: str) -> None:
         sid = f"{ms.info.slug}:{self.now_ms}:{side}:{kind}"
+        if agent != self.baseline_name:  # the original strategy keeps its ids (and so its latency draws)
+            sid += f":{agent}"
         lat = self.sample_latency_ms(sid)
         arrival = self.now_ms + int(math.ceil(lat))
         ok = self.store.insert_signal(dict(
             id=sid, slug=ms.info.slug, ts_ms=self.now_ms, side=side, kind=kind, p_win=p_win, best_ask=ask,
             limit_price=limit, edge=edge, tau_s=tau, latency_ms=lat, arrival_ms=arrival, budget=budget,
-            status="pending", detail="{}",
+            status="pending", detail="{}", agent=agent,
         ))
         if not ok:
             return
         self._inc("signals")
-        self.last_decision = dict(id=sid, side=side, kind=kind, p_win=round(p_win, 4), ask=ask, limit=limit,
-                                  edge=round(edge, 4), latency_ms=round(lat, 1))
+        if agent != self.baseline_name:
+            self._inc(f"{agent}:signals")
+        self.last_decision = dict(id=sid, agent=agent, side=side, kind=kind, p_win=round(p_win, 4), ask=ask,
+                                  limit=limit, edge=round(edge, 4), latency_ms=round(lat, 1))
         log.info("signal %s", self.last_decision)
-        self.pending.append(PendingOrder(sid, ms.info.slug, side, token, kind, arrival, limit, budget, p_win))
+        self.pending.append(PendingOrder(sid, ms.info.slug, side, token, kind, arrival, limit, budget, p_win, agent))
 
     # ------------------------------------------------------------------ execution
     def _execute_due(self) -> None:
@@ -532,11 +861,20 @@ class Engine:
             self._execute(po)
 
     def _arrival_p_win(self, po: PendingOrder) -> float | None:
+        """The ordering agent's own (central) P(win), re-evaluated when the order reaches the book."""
         ms = self.markets.get(po.slug)
-        pred = self.predict(ms) if ms else None
-        if pred is None:
+        inp = self.model_input(ms) if ms else None
+        if ms is None or inp is None:
             return None
-        p = pred.p_up if po.side == "Up" else 1.0 - pred.p_up
+        pred = self.model.predict(inp)
+        p_up = pred.p_up
+        ag = self.rl_by_name.get(po.agent)
+        if ag is not None:
+            feats = self.rl_features(ms, inp, pred)
+            if feats is None:
+                return None
+            p_up = rl.predictive(*ag.learner.predict(ag.project(feats[0])))
+        p = p_up if po.side == "Up" else 1.0 - p_up
         return min(max(p, 1.0 - self.s.p_clip), self.s.p_clip)
 
     def _execute(self, po: PendingOrder) -> None:
@@ -555,7 +893,7 @@ class Engine:
             self.store.update_signal(po.sid, "resting", {"p_win_arrival": p_arr})
             return
         book = self.books.get(po.token)
-        asks = book.asks_ascending() if book else []
+        asks = self._asks_for(po.token)
         fill = simulate_taker_buy(asks, po.limit_price, po.budget, m.min_size, m.fee_rate, m.fee_exponent,
                                   self.s.book_take_fraction, self.s.fee_round_up)
         if not fill.levels:
@@ -563,6 +901,9 @@ class Engine:
                                                         "best_ask_arrival": book.best_ask() if book else None})
             self._inc("missed")
             return
+        taken = self.own_taken.setdefault(po.token, {})
+        for lv in fill.levels:
+            taken[lv.price] = taken.get(lv.price, 0.0) + lv.shares
         edge_arr = (p_arr - fill.cost_per_net_share) if p_arr is not None else None
         self._record_fill(po, po.sid, fill.gross_shares, fill.net_shares, fill.cost_usdc, fill.fee_usdc,
                           fill.avg_price, p_arr, edge_arr, [(lv.price, lv.shares, lv.fee_usdc) for lv in fill.levels])
@@ -574,11 +915,12 @@ class Engine:
         if self.store.insert_fill(dict(
             id=fid, slug=po.slug, side=po.side, ts_ms=self.now_ms, kind=po.kind, gross_shares=gross,
             net_shares=net, cost=cost, fee=fee, avg_price=avg, p_win_decision=po.p_win,
-            p_win_arrival=p_arr, edge_arrival=edge_arr, levels=json.dumps(levels),
+            p_win_arrival=p_arr, edge_arrival=edge_arr, levels=json.dumps(levels), agent=po.agent,
         )):
             self.open_slugs.add(po.slug)
             self._inc("fills")
-            log.info("fill %s side=%s net=%.2f cost=%.4f fee=%.5f avg=%.4f", fid, po.side, net, cost, fee, avg)
+            log.info("fill %s agent=%s side=%s net=%.2f cost=%.4f fee=%.5f avg=%.4f", fid, po.agent, po.side, net,
+                     cost, fee, avg)
 
     def _maker_on_trade(self, ev: TradePrint) -> None:
         if not self.resting:
@@ -610,6 +952,7 @@ class Engine:
                 log.warning("strike mismatch %s ours=%.6f gamma=%.6f", r.slug, row["strike"], r.price_to_beat)
                 self._inc("strike_mismatch")
         self._settle(r.slug, r.winner, "gamma")
+        self._rl_learn(r.slug, r.winner)
 
     def _settle(self, slug: str, winner: str, by: str) -> None:
         for f in self.store.fills_for(slug):
@@ -660,6 +1003,12 @@ class Engine:
                      for ms in self.markets.values()],
             pending=len(self.pending),
             resting=len(self.resting),
+            agents=list(self.agent_names),
+            rl={a.name: dict(windows_learned=a.learner.windows, trading=a.learner.windows >= self.s.rl_min_windows,
+                             warmup_windows=self.s.rl_min_windows,
+                             penalty=round(a.penalty(self.s.rl_bias_prior_trades), 4),
+                             judged_trades=round(a.bias_n, 2), unresolved_windows=len(a.virtual))
+                for a in self.rl_agents},
             counters=dict(self.counters),
             parse=dict(ok=self.stats.ok, ignored=self.stats.ignored, errors=self.stats.errors,
                        last_error=self.stats.last_error),

@@ -1,7 +1,11 @@
-"""SQLite persistence for markets, signals, fills, settlements and model predictions.
+"""SQLite persistence for markets, signals, fills, settlements, model predictions, paper deposits and the
+learned state of the online-learning agents.
 
 Writes are idempotent (deterministic primary keys + INSERT OR IGNORE / guarded UPDATEs), so a restart
-cannot double-count a fill or a settlement.
+cannot double-count a fill, a settlement or a deposit.
+
+Every agent trades from the same paper account: cash is one pool (starting bankroll + deposits - costs +
+payouts), and signals and fills carry the ``agent`` that made them, for attribution only.
 """
 
 from __future__ import annotations
@@ -22,12 +26,14 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE TABLE IF NOT EXISTS signals (
   id TEXT PRIMARY KEY, slug TEXT, ts_ms INTEGER, side TEXT, kind TEXT,
   p_win REAL, best_ask REAL, limit_price REAL, edge REAL, tau_s REAL,
-  latency_ms REAL, arrival_ms INTEGER, budget REAL, status TEXT, detail TEXT
+  latency_ms REAL, arrival_ms INTEGER, budget REAL, status TEXT, detail TEXT,
+  agent TEXT NOT NULL DEFAULT 'gbm_twap'
 );
 CREATE TABLE IF NOT EXISTS fills (
   id TEXT PRIMARY KEY, slug TEXT, side TEXT, ts_ms INTEGER, kind TEXT,
   gross_shares REAL, net_shares REAL, cost REAL, fee REAL, avg_price REAL,
-  p_win_decision REAL, p_win_arrival REAL, edge_arrival REAL, levels TEXT
+  p_win_decision REAL, p_win_arrival REAL, edge_arrival REAL, levels TEXT,
+  agent TEXT NOT NULL DEFAULT 'gbm_twap'
 );
 CREATE TABLE IF NOT EXISTS settlements (
   id TEXT PRIMARY KEY, slug TEXT, ts_ms INTEGER, won INTEGER, payout REAL, pnl REAL, settled_by TEXT
@@ -35,9 +41,17 @@ CREATE TABLE IF NOT EXISTS settlements (
 CREATE TABLE IF NOT EXISTS predictions (
   slug TEXT, ts_ms INTEGER, tau_s REAL, p_up REAL, PRIMARY KEY (slug, ts_ms)
 );
+CREATE TABLE IF NOT EXISTS deposits (id TEXT PRIMARY KEY, ts_ms INTEGER, amount REAL);
+CREATE TABLE IF NOT EXISTS rl_state (agent TEXT PRIMARY KEY, state TEXT NOT NULL, updated_ms INTEGER);
+CREATE TABLE IF NOT EXISTS agent_predictions (
+  agent TEXT, slug TEXT, ts_ms INTEGER, tau_s REAL, p_up REAL, PRIMARY KEY (agent, slug, ts_ms)
+);
 CREATE INDEX IF NOT EXISTS idx_signals_slug ON signals(slug);
 CREATE INDEX IF NOT EXISTS idx_fills_slug ON fills(slug);
 """
+
+# Databases created before agents existed hold only the original strategy's trades.
+LEGACY_AGENT = "gbm_twap"
 
 
 class Storage:
@@ -50,6 +64,15 @@ class Storage:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring a database written by an older version up to date (idempotent). New columns are appended,
+        so migrated and fresh databases have the same column order."""
+        for table in ("signals", "fills"):
+            cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if "agent" not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN agent TEXT NOT NULL DEFAULT '{LEGACY_AGENT}'")
 
     # --- meta ---
     def get_meta(self, key: str) -> str | None:
@@ -111,10 +134,11 @@ class Storage:
     def pending_signals(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM signals WHERE status IN ('pending','resting')").fetchall()
 
-    def entries_for(self, slug: str) -> int:
+    def entries_for(self, slug: str, agent: str) -> int:
+        """Entries ``agent`` has made in this market (each agent has its own per-market limit)."""
         r = self.db.execute(
-            "SELECT COUNT(*) FROM signals WHERE slug=? AND status IN ('pending','resting','filled','partial')",
-            (slug,),
+            "SELECT COUNT(*) FROM signals WHERE slug=? AND agent=? AND status IN ('pending','resting','filled','partial')",
+            (slug, agent),
         ).fetchone()
         return int(r[0])
 
@@ -143,11 +167,31 @@ class Storage:
     def insert_prediction(self, slug: str, ts_ms: int, tau_s: float, p_up: float) -> None:
         self.db.execute("INSERT OR IGNORE INTO predictions VALUES (?,?,?,?)", (slug, ts_ms, tau_s, p_up))
 
+    def insert_agent_prediction(self, agent: str, slug: str, ts_ms: int, tau_s: float, p_up: float) -> None:
+        """P(Up) of one predictor (an RL agent, ``gbm_twap`` or ``market``), all sampled at the same moments."""
+        self.db.execute("INSERT OR IGNORE INTO agent_predictions VALUES (?,?,?,?,?)", (agent, slug, ts_ms, tau_s, p_up))
+
+    # --- learned agent state (kept by a paper-account reset: it is knowledge about markets, not money) ---
+    def get_rl_state(self, agent: str) -> str | None:
+        r = self.db.execute("SELECT state FROM rl_state WHERE agent=?", (agent,)).fetchone()
+        return r[0] if r else None
+
+    def set_rl_state(self, agent: str, state: str, ts_ms: int) -> None:
+        self.db.execute("INSERT OR REPLACE INTO rl_state(agent, state, updated_ms) VALUES (?,?,?)", (agent, state, ts_ms))
+
     # --- money ---
+    def insert_deposit(self, dep_id: str, ts_ms: int, amount: float) -> bool:
+        cur = self.db.execute("INSERT OR IGNORE INTO deposits(id, ts_ms, amount) VALUES (?,?,?)", (dep_id, ts_ms, amount))
+        return cur.rowcount == 1
+
+    def deposits_total(self) -> float:
+        return float(self.db.execute("SELECT COALESCE(SUM(amount),0) FROM deposits").fetchone()[0])
+
     def cash(self, starting: float) -> float:
+        """The one cash pool every agent trades from."""
         spent = self.db.execute("SELECT COALESCE(SUM(cost),0) FROM fills").fetchone()[0]
         paid = self.db.execute("SELECT COALESCE(SUM(payout),0) FROM settlements").fetchone()[0]
-        return starting - float(spent) + float(paid)
+        return starting - float(spent) + float(paid) + self.deposits_total()
 
     def open_cost(self) -> float:
         r = self.db.execute(
@@ -156,11 +200,12 @@ class Storage:
         return float(r[0])
 
     def reset_trading(self, now_ms: int) -> None:
-        """Start the paper account over: drop all signals, fills, settlements and predictions and restart the
-        performance clock. Market metadata and outcomes stay (live windows still need their strikes)."""
+        """Start the paper account over: drop all signals, fills, settlements, predictions and deposits and
+        restart the performance clock. Market metadata and outcomes stay (live windows still need their
+        strikes), and so does what the learning agents have learned (``rl_state``)."""
         self.db.execute("BEGIN IMMEDIATE")
         try:
-            for table in ("signals", "fills", "settlements", "predictions"):
+            for table in ("signals", "fills", "settlements", "predictions", "agent_predictions", "deposits"):
                 self.db.execute(f"DELETE FROM {table}")
             self.set_meta("first_start_ms", str(now_ms))
             self.set_meta("last_reset_ms", str(now_ms))
